@@ -31,8 +31,6 @@
 #include "randseries.h"
 
 
-static int has_hw_aes = 0;
-
 
 
 struct cmdlineoption {
@@ -365,18 +363,6 @@ static int connect_socket (const char *msg, const char *address, int port)
 }
 
 
-
-static void write_uint (void *out_, unsigned long long v, int l)
-{
-    unsigned char *out;
-    out = (unsigned char *) out_;
-    out += (l - 1);
-    do {
-        *out-- = (v & 0xFF);
-        v >>= 8;
-    } while (--l);
-}
-
 static unsigned long long read_uint (const void *in_, int l)
 {
     unsigned long long v = 0UL;
@@ -389,33 +375,7 @@ static unsigned long long read_uint (const void *in_, int l)
     return v;
 }
 
-struct pkthdr {
-    unsigned char pkttype;
-    unsigned short length;
-} __attribute ((packed));
 
-struct pkthdr_chk {
-    uint64_t non_replay_counter;
-    unsigned char pkttype;
-    unsigned short length;
-} __attribute ((packed));
-
-struct header {
-    struct pkthdr hdr;
-    unsigned char iv[FASTSEC_BLOCK_SZ];
-    struct pkthdr_chk hdr_chk;      /* <== this part is also sent crypto */
-} __attribute ((packed));
-
-struct trailer {
-    unsigned char chksum[FASTSEC_BLOCK_SZ];
-} __attribute ((packed));
-
-#define HEADER_SIZE     ((int) sizeof(struct header))
-#define TRAILER_SIZE    ((int) sizeof(struct trailer))
-
-#define FULLLEN(c)      ((c) + (int) sizeof(struct pkthdr_chk))
-#define CRYPTLEN(c)     ((FULLLEN(c) + (FASTSEC_BLOCK_SZ - 1)) - ((FULLLEN(c) + (FASTSEC_BLOCK_SZ - 1))) % FASTSEC_BLOCK_SZ)
-#define ROUND(c)        (CRYPTLEN(c) - (int) sizeof(struct pkthdr_chk))
 
 #define BUF_SIZE        16384
 
@@ -460,39 +420,10 @@ struct cryptobuf {
     uint64_t non_replay_counter;
 };
 
+
 static void make_encrypted_packet (struct cryptobuf *buf, struct randseries *s, int pkttype, int len)
 {
-    struct header *h;
-    struct trailer *t;
-    unsigned char iv[FASTSEC_BLOCK_SZ];
-
-    h = (struct header *) &buf->data[buf->avail];
-
-    write_uint (&h->hdr.pkttype, pkttype, sizeof (h->hdr.pkttype));
-    write_uint (&h->hdr.length, ROUND (len), sizeof (h->hdr.length));
-    write_uint (&h->hdr_chk.non_replay_counter, buf->non_replay_counter, sizeof (h->hdr_chk.non_replay_counter));
-    write_uint (&h->hdr_chk.pkttype, pkttype, sizeof (h->hdr_chk.pkttype));
-    write_uint (&h->hdr_chk.length, len, sizeof (h->hdr_chk.length));
-
-    buf->non_replay_counter++;
-
-    randseries_bytes (s, iv, FASTSEC_BLOCK_SZ);
-    memcpy (h->iv, iv, FASTSEC_BLOCK_SZ);
-
-    /* zero trailing bytes */
-    memset (((unsigned char *) &h->hdr_chk) + FULLLEN (len), '\0', CRYPTLEN (len) - FULLLEN (len));
-
-    if (has_hw_aes)
-        aes_ni_cbc_encrypt ((const unsigned char *) &h->hdr_chk, (unsigned char *) &h->hdr_chk, CRYPTLEN (len), &buf->aes, iv);
-    else
-        aes_cbc128_encrypt ((const unsigned char *) &h->hdr_chk, (unsigned char *) &h->hdr_chk, CRYPTLEN (len), &buf->aes, iv);
-
-    buf->avail += HEADER_SIZE + ROUND (len);
-
-    t = (struct trailer *) &buf->data[buf->avail];
-    memcpy (t->chksum, iv, FASTSEC_BLOCK_SZ);
-
-    buf->avail += TRAILER_SIZE;
+    buf->avail += fastsec_encrypt_packet (&buf->data[buf->avail], &buf->non_replay_counter, &buf->aes, s, pkttype, len);
 }
 
 
@@ -687,12 +618,7 @@ int main (int argc, char **argv)
     const char *remotepubkey_fname = "/var/tmp/tapfwd-ecurve-remote-public-key.dat";
     const char *pubkey_fname = "/var/tmp/tapfwd-ecurve-public-key.dat";
 
-    fastsec_runcurvetests ();
-
-    if (FASTSEC_KEY_SZ == 32)
-        has_hw_aes = aes_has_aesni ();
-    else
-        has_hw_aes = 0;
+    fastsec_init ();
 
     randseries = randseries_new (FASTSEC_KEY_SZ);
 
@@ -762,8 +688,6 @@ int main (int argc, char **argv)
         fatalerror (pubkey_fname);
 
     devfd = configure_network (cmdlineopt);
-
-    printf ("has_hw_aes=%d, sizeof(long)=%d\n", has_hw_aes, (int) sizeof (long));
 
     setup_sig_handlers ();
 
@@ -885,16 +809,9 @@ int main (int argc, char **argv)
         break;
     }
 
-    if (has_hw_aes) {
-        if (aes_ni_set_encrypt_key (buf1.key, &buf1.aes) || aes_ni_set_decrypt_key (buf2.key, &buf2.aes)) {
-            fprintf (stderr, "error: failure setting key\n");
-            exit (1);
-        }
-    } else {
-        if (aes_set_encrypt_key (buf1.key, FASTSEC_KEY_SZ * 8, &buf1.aes) || aes_set_decrypt_key (buf2.key, FASTSEC_KEY_SZ * 8, &buf2.aes)) {
-            fprintf (stderr, "error: failure setting key\n");
-            exit (1);
-        }
+    if (fastsec_set_aeskeys (buf1.key, &buf1.aes, buf2.key, &buf2.aes)) {
+        fprintf (stderr, "error: failure setting key\n");
+        exit (1);
     }
 
     /* hide secrets: */
@@ -925,7 +842,7 @@ int main (int argc, char **argv)
                 nfds = max(nfds, fd);                           \
             }
 
-        SETUP (devfd, rd, BUF_SIZE - buf1.avail, 1500 + HEADER_SIZE + TRAILER_SIZE + 256);      /* 256 = fudge */
+        SETUP (devfd, rd, BUF_SIZE - buf1.avail, 1500 + FASTSEC_HEADER_SIZE + FASTSEC_TRAILER_SIZE + 256);      /* 256 = fudge */
         SETUP (sock, rd, BUF_SIZE - buf2.avail, 1);
         SETUP (sock, wr, buf1.avail - buf1.written, 1);
 
@@ -963,15 +880,15 @@ int main (int argc, char **argv)
         time (&now);
 
         if (!future_packet_sent) {
-            if (BUF_SIZE - buf1.avail >= (HEADER_SIZE + 23 + TRAILER_SIZE)) {
+            if (BUF_SIZE - buf1.avail >= (FASTSEC_HEADER_SIZE + 23 + FASTSEC_TRAILER_SIZE)) {
                 future_packet_sent = 1;
-                memset (buf1.data + buf1.avail + HEADER_SIZE, '\0', 23);
+                memset (buf1.data + buf1.avail + FASTSEC_HEADER_SIZE, '\0', 23);
                 make_encrypted_packet (&buf1, randseries, PKTTYPE_FUTURE, 23);  /* verify that future packet-types don't terminate the remote end */
             }
         }
 
         if (!last_hb_sent || now > last_hb_sent) {
-            if (BUF_SIZE - buf1.avail >= (HEADER_SIZE + TRAILER_SIZE)) {
+            if (BUF_SIZE - buf1.avail >= (FASTSEC_HEADER_SIZE + FASTSEC_TRAILER_SIZE)) {
                 last_hb_sent = now;
                 make_encrypted_packet (&buf1, randseries, PKTTYPE_HEARTBEAT, 0);
             }
@@ -983,7 +900,7 @@ int main (int argc, char **argv)
 
         if (FD_ISSET (devfd, &rd)) {
             int r;
-            r = read (devfd, buf1.data + buf1.avail + HEADER_SIZE, BUF_SIZE - buf1.avail - (HEADER_SIZE + TRAILER_SIZE));
+            r = read (devfd, buf1.data + buf1.avail + FASTSEC_HEADER_SIZE, BUF_SIZE - buf1.avail - (FASTSEC_HEADER_SIZE + FASTSEC_TRAILER_SIZE));
             if (r == -1 && errno_TEMP ()) {
                 /* ignore */
             } else if (r < 1) {
@@ -997,26 +914,23 @@ int main (int argc, char **argv)
 
         while (buf2.avail - buf2.written > 0) {
             int buf2_written_;
-            int len_round, len, pkttype, pkttype_chk;
-            uint64_t non_replay_counter;
+            int len_round, len, pkttype;
             struct header *h;
-            struct trailer *t;
 
             buf2_written_ = buf2.written;
 
-            if (buf2.avail - buf2_written_ < HEADER_SIZE)
+            if (buf2.avail - buf2_written_ < FASTSEC_HEADER_SIZE)
                 goto out;
 
             h = (struct header *) &buf2.data[buf2_written_];
-            buf2_written_ += HEADER_SIZE;
+            buf2_written_ += FASTSEC_HEADER_SIZE;
 
-            pkttype = read_uint (&h->hdr.pkttype, sizeof (h->hdr.pkttype));
             len_round = read_uint (&h->hdr.length, sizeof (h->hdr.length));
 
-            if (len_round > BUF_SIZE - (HEADER_SIZE + ROUND (0) + TRAILER_SIZE))
+            if (len_round > BUF_SIZE - (FASTSEC_HEADER_SIZE + FASTSEC_ROUND (0) + FASTSEC_TRAILER_SIZE))
                 SHUTRESTART ("bad length\n");
 
-            if (buf2.avail - buf2_written_ < len_round + TRAILER_SIZE) {
+            if (buf2.avail - buf2_written_ < len_round + FASTSEC_TRAILER_SIZE) {
               out:
                 memmove (buf2.data, buf2.data + buf2.written, buf2.avail - buf2.written);
                 buf2.avail -= buf2.written;
@@ -1024,27 +938,18 @@ int main (int argc, char **argv)
                 break;
             }
 
-            if (has_hw_aes)
-                aes_ni_cbc_decrypt ((const unsigned char *) &h->hdr_chk, (unsigned char *) &h->hdr_chk, len_round + sizeof (struct pkthdr_chk), &buf2.aes, h->iv);
-            else
-                aes_cbc128_decrypt ((const unsigned char *) &h->hdr_chk, (unsigned char *) &h->hdr_chk, len_round + sizeof (struct pkthdr_chk), &buf2.aes, h->iv);
-
-            non_replay_counter = read_uint (&h->hdr_chk.non_replay_counter, sizeof (h->hdr_chk.non_replay_counter));
-            pkttype_chk = read_uint (&h->hdr_chk.pkttype, sizeof (h->hdr_chk.pkttype));
-            len = read_uint (&h->hdr_chk.length, sizeof (h->hdr_chk.length));
-
-            t = (struct trailer *) &buf2.data[buf2_written_ + len_round];
-
-            if (pkttype_chk != pkttype)
+            switch (fastsec_decrypt_packet (&buf2.data[buf2.written], len_round, &pkttype, &buf2.non_replay_counter, &buf2.aes, &len)) {
+            case FASTSEC_RESULT_DECRYPT_SUCCESS:
+                break;
+            case FASTSEC_RESULT_DECRYPT_FAIL_PKTTYPE:
                 SHUTRESTART ("packet type check failed\n");
-            if (len_round != ROUND (len))
+            case FASTSEC_RESULT_DECRYPT_FAIL_LEN:
                 SHUTRESTART ("length len check failed\n");
-            if (memcmp (t->chksum, h->iv, sizeof (t->chksum)))
+            case FASTSEC_RESULT_DECRYPT_FAIL_CHKSUM:
                 SHUTRESTART ("checksum failed\n");
-            if (buf2.non_replay_counter != non_replay_counter)
+            case FASTSEC_RESULT_DECRYPT_FAIL_REPLAY:
                 SHUTRESTART ("replay attack detected\n");
-
-            buf2.non_replay_counter++;
+            }
 
             pkt_recv_count++;
 
@@ -1067,7 +972,7 @@ int main (int argc, char **argv)
                 /* ignore unknown packet types for future versions */
                 break;
             }
-            buf2.written = buf2_written_ + len_round + TRAILER_SIZE;
+            buf2.written = buf2_written_ + len_round + FASTSEC_TRAILER_SIZE;
         }
 
         PROCESS (sock, write, wr, buf1.data, buf1.written, buf1.avail - buf1.written);

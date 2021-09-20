@@ -39,6 +39,9 @@
 #define ERRMSG_LEN              160
 
 
+static int fastsec_has_hw_aes = 0;
+
+
 /* y² = x³ + 486662x² + x */
 extern int curve25519 (unsigned char *mypublic, const unsigned char *secret, const unsigned char *basepoint);
 
@@ -93,6 +96,29 @@ static void xor_mem (unsigned char *a, const unsigned char *b, int l)
     int i;
     for (i = 0; i < l; i++)
         a[i] ^= b[i];
+}
+
+static void write_uint (void *out_, unsigned long long v, int l)
+{
+    unsigned char *out;
+    out = (unsigned char *) out_;
+    out += (l - 1);
+    do {
+        *out-- = (v & 0xFF);
+        v >>= 8;
+    } while (--l);
+}
+
+static unsigned long long read_uint (const void *in_, int l)
+{
+    unsigned long long v = 0UL;
+    const unsigned char *in;
+    in = (unsigned char *) in_;
+    do {
+        v <<= 8;
+        v |= (*in++ & 0xff);
+    } while (--l);
+    return v;
 }
 
 static void write_hex_str (char *t, const unsigned char *d, int l)
@@ -611,6 +637,29 @@ static void keydgst (const unsigned char *egg_white, const unsigned char *egg_yo
     }
 }
 
+void fastsec_init (void)
+{
+    fastsec_runcurvetests ();
+
+    if (FASTSEC_KEY_SZ == 32)
+        fastsec_has_hw_aes = aes_has_aesni ();
+    else
+        fastsec_has_hw_aes = 0;
+}
+
+int fastsec_set_aeskeys (unsigned char *key1, struct aes_key_st *aes1, unsigned char *key2, struct aes_key_st *aes2)
+{
+    if (fastsec_has_hw_aes) {
+        if (aes_ni_set_encrypt_key (key1, aes1) || aes_ni_set_decrypt_key (key2, aes2))
+            return 1;
+    } else {
+        if (aes_set_encrypt_key (key1, FASTSEC_KEY_SZ * 8, aes1) || aes_set_decrypt_key (key2, FASTSEC_KEY_SZ * 8, aes2))
+            return 1;
+    }
+    printf ("fastsec_set_aeskeys success, fastsec_has_hw_aes=%d, sizeof(long)=%d\n", fastsec_has_hw_aes, (int) sizeof (long));
+    return 0;
+}
+
 enum fastsec_result fastsec_keyexchange (struct fastsec_keyexchange_info *info, struct randseries *randseries, char *errmsg, unsigned char *key1, unsigned char *key2)
 {
     struct handshakedata hd;
@@ -691,4 +740,73 @@ enum fastsec_result fastsec_keyexchange (struct fastsec_keyexchange_info *info, 
     return r;
 }
 
+
+int fastsec_encrypt_packet (char *out, uint64_t *non_replay_counter, struct aes_key_st *aes, struct randseries *s, int pkttype, int len)
+{
+    struct header *h;
+    struct trailer *t;
+    unsigned char iv[FASTSEC_BLOCK_SZ];
+
+    h = (struct header *) out;
+
+    write_uint (&h->hdr.pkttype, pkttype, sizeof (h->hdr.pkttype));
+    write_uint (&h->hdr.length, FASTSEC_ROUND (len), sizeof (h->hdr.length));
+    write_uint (&h->hdr_chk.non_replay_counter, *non_replay_counter, sizeof (h->hdr_chk.non_replay_counter));
+    write_uint (&h->hdr_chk.pkttype, pkttype, sizeof (h->hdr_chk.pkttype));
+    write_uint (&h->hdr_chk.length, len, sizeof (h->hdr_chk.length));
+
+    (*non_replay_counter)++;
+
+    randseries_bytes (s, iv, FASTSEC_BLOCK_SZ);
+    memcpy (h->iv, iv, FASTSEC_BLOCK_SZ);
+
+    /* zero trailing bytes */
+    memset (((unsigned char *) &h->hdr_chk) + FASTSEC_FULLLEN (len), '\0', FASTSEC_CRYPTLEN (len) - FASTSEC_FULLLEN (len));
+
+    if (fastsec_has_hw_aes)
+        aes_ni_cbc_encrypt ((const unsigned char *) &h->hdr_chk, (unsigned char *) &h->hdr_chk, FASTSEC_CRYPTLEN (len), aes, iv);
+    else
+        aes_cbc128_encrypt ((const unsigned char *) &h->hdr_chk, (unsigned char *) &h->hdr_chk, FASTSEC_CRYPTLEN (len), aes, iv);
+
+    t = (struct trailer *) &out[FASTSEC_HEADER_SIZE + FASTSEC_ROUND (len)];
+    memcpy (t->chksum, iv, FASTSEC_BLOCK_SZ);
+
+    return FASTSEC_HEADER_SIZE + FASTSEC_ROUND (len) + FASTSEC_TRAILER_SIZE;
+}
+
+
+enum fastsec_result_decrypt fastsec_decrypt_packet (char *in, int len_round, int *pkttype, uint64_t *non_replay_counter, struct aes_key_st *aes, int *len)
+{
+    struct header *h;
+    struct trailer *t;
+    uint64_t non_replay_counter_chk;
+    int pkttype_chk;
+
+    h = (struct header *) in;
+
+    *pkttype = read_uint (&h->hdr.pkttype, sizeof (h->hdr.pkttype));
+
+    if (fastsec_has_hw_aes)
+        aes_ni_cbc_decrypt ((const unsigned char *) &h->hdr_chk, (unsigned char *) &h->hdr_chk, len_round + sizeof (struct pkthdr_chk), aes, h->iv);
+    else
+        aes_cbc128_decrypt ((const unsigned char *) &h->hdr_chk, (unsigned char *) &h->hdr_chk, len_round + sizeof (struct pkthdr_chk), aes, h->iv);
+
+    non_replay_counter_chk = read_uint (&h->hdr_chk.non_replay_counter, sizeof (h->hdr_chk.non_replay_counter));
+    pkttype_chk = read_uint (&h->hdr_chk.pkttype, sizeof (h->hdr_chk.pkttype));
+    *len = read_uint (&h->hdr_chk.length, sizeof (h->hdr_chk.length));
+
+    t = (struct trailer *) &in[len_round + FASTSEC_HEADER_SIZE];
+
+    if (pkttype_chk != *pkttype)
+        return FASTSEC_RESULT_DECRYPT_FAIL_PKTTYPE;
+    if (len_round != FASTSEC_ROUND (*len))
+        return FASTSEC_RESULT_DECRYPT_FAIL_LEN;
+    if (memcmp (t->chksum, h->iv, sizeof (t->chksum)))
+        return FASTSEC_RESULT_DECRYPT_FAIL_CHKSUM;
+    if (*non_replay_counter != non_replay_counter_chk)
+        return FASTSEC_RESULT_DECRYPT_FAIL_REPLAY;
+
+    (*non_replay_counter)++;
+    return FASTSEC_RESULT_DECRYPT_SUCCESS;
+}
 

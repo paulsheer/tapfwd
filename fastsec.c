@@ -822,8 +822,16 @@ void fastsec_construct_ticket (union reconnect_ticket *ticket)
     write_uint (&ticket->d.utc_seconds, expire_time, sizeof (ticket->d.utc_seconds));
 }
 
-enum fastsec_result_avail fastsec_avail (struct fastsec *fs, char *data, int datalen, enum fastsec_result_decrypt *err_decrypt, time_t now, int *read_count)
+
+
+
+
+
+enum fastsec_result_avail fastsec_process_ciphertext (struct fastsec *fs, char *data, int datalen, enum fastsec_result_decrypt *err_decrypt, int *read_count)
 {
+    time_t now;
+
+    time (&now);
     *read_count = 0;
 
     while (datalen > 0) {
@@ -844,7 +852,7 @@ enum fastsec_result_avail fastsec_avail (struct fastsec *fs, char *data, int dat
         if (datalen < FASTSEC_HEADER_SIZE + len_round + FASTSEC_TRAILER_SIZE)
             return FASTSEC_RESULT_AVAIL_SUCCESS_NEED_MORE_INPUT;
 
-        switch ((err = fastsec_decrypt_packet (data, len_round, &pkttype, fs->non_replay_counter, fs->aes, &len))) {
+        switch ((err = fastsec_decrypt_packet (data, len_round, &pkttype, fs->non_replay_counter_decrypt, fs->aes_decrypt, &len))) {
         case FASTSEC_RESULT_DECRYPT_SUCCESS:
             break;
         default:
@@ -899,6 +907,41 @@ printf ("TBD\n");
         datalen -= FASTSEC_HEADER_SIZE + len_round + FASTSEC_TRAILER_SIZE;
     }
     return FASTSEC_RESULT_AVAIL_SUCCESS;
+}
+
+
+enum fastsec_housekeeping_result fastsec_housekeeping (struct fastsec *fs, char *buf, int buflen, int *result_len)
+{
+    time_t now;
+    const int maxlen = FASTSEC_HEADER_SIZE + 23 + FASTSEC_BLOCK_SZ + FASTSEC_TRAILER_SIZE + FASTSEC_HEADER_SIZE + 0 + FASTSEC_BLOCK_SZ + FASTSEC_TRAILER_SIZE;
+
+    *result_len = 0;
+
+    if (buflen < maxlen)
+        return FASTSEC_HOUSEKEEPING_RESULT_FAIL_BUF_TOO_SMALL;
+
+    time (&now);
+
+    buf[maxlen - 1] = '~';
+
+    if (!*fs->future_packet_sent) {
+        *fs->future_packet_sent = 1;
+        memset (&buf[FASTSEC_HEADER_SIZE], '\0', 23);
+/* verify that future packet-types don't terminate the remote end */
+        *result_len += fastsec_encrypt_packet (&buf[*result_len], fs->non_replay_counter_encrypt, fs->aes_encrypt, fs->randseries, FASTSEC_PKTTYPE_FUTURE, 23);
+    }
+
+    if (!*fs->last_hb_sent || now > *fs->last_hb_sent) {
+        *fs->last_hb_sent = now;
+        *result_len += fastsec_encrypt_packet (&buf[*result_len], fs->non_replay_counter_encrypt, fs->aes_encrypt, fs->randseries, FASTSEC_PKTTYPE_HEARTBEAT, 0);
+    }
+
+    assert (buf[maxlen - 1] == '~');
+
+    if (*fs->last_hb_recv && now > *fs->last_hb_recv + 3)
+        return FASTSEC_HOUSEKEEPING_RESULT_FAIL_HEARTBEAT_TIMEOUT;
+
+    return FASTSEC_HOUSEKEEPING_RESULT_SUCCESS;
 }
 
 

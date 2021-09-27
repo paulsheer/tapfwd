@@ -585,9 +585,10 @@ unsigned long hash_str (const char *s)
 
 int main (int argc, char **argv)
 {
+    struct fastsec fs_, *fs;
     struct cmdlineoption cmdlineopt_;
     struct cmdlineoption *cmdlineopt;
-    time_t last_hb_sent, last_hb_recv, now;
+    time_t last_hb_sent, last_hb_recv;
     int future_packet_sent = 0;
     uint64_t pkt_recv_count;
     int client_close_req_recieved = 0;
@@ -701,6 +702,24 @@ int main (int argc, char **argv)
     } while (0)
 
   restart:
+
+
+    fs = &fs_;
+    memset (fs, '\0', sizeof (*fs));
+
+    fs->aes_encrypt = &buf1.aes;
+    fs->aes_decrypt = &buf2.aes;
+    fs->client_close_req_recieved = &client_close_req_recieved;
+    fs->devfd = devfd;
+    fs->future_packet_sent = &future_packet_sent;
+    fs->last_hb_recv = &last_hb_recv;
+    fs->last_hb_sent = &last_hb_sent;
+    fs->non_replay_counter_encrypt = &buf1.non_replay_counter;
+    fs->non_replay_counter_decrypt = &buf2.non_replay_counter;
+    fs->pkt_recv_count = &pkt_recv_count;
+    fs->randseries = randseries;
+    fs->server = (cmdlineopt->co_listen != NULL);
+    fs->server_ticket_recieved = &server_ticket_recieved;
 
     pkt_recv_count = 0UL;
 
@@ -866,26 +885,23 @@ int main (int argc, char **argv)
                         end += r;                                       \
                 }
 
+        {
+            enum fastsec_housekeeping_result r;
+            int result_len = 0;
 
-        time (&now);
+            r = fastsec_housekeeping (fs, &buf1.data[buf1.avail], FASTSEC_BUF_SIZE - buf1.avail, &result_len);
 
-        if (!future_packet_sent) {
-            if (FASTSEC_BUF_SIZE - buf1.avail >= (FASTSEC_HEADER_SIZE + 23 + FASTSEC_TRAILER_SIZE)) {
-                future_packet_sent = 1;
-                memset (buf1.data + buf1.avail + FASTSEC_HEADER_SIZE, '\0', 23);
-                make_encrypted_packet (&buf1, randseries, FASTSEC_PKTTYPE_FUTURE, 23);  /* verify that future packet-types don't terminate the remote end */
+            switch (r) {
+            case FASTSEC_HOUSEKEEPING_RESULT_SUCCESS:
+                buf1.avail += result_len;
+                break;
+            case FASTSEC_HOUSEKEEPING_RESULT_FAIL_HEARTBEAT_TIMEOUT:
+                SHUTRESTART ("timeout - restarting\n");
+                break;
+            case FASTSEC_HOUSEKEEPING_RESULT_FAIL_BUF_TOO_SMALL:
+                /* this is rare. it is not problem. */
+                break;
             }
-        }
-
-        if (!last_hb_sent || now > last_hb_sent) {
-            if (FASTSEC_BUF_SIZE - buf1.avail >= (FASTSEC_HEADER_SIZE + FASTSEC_TRAILER_SIZE)) {
-                last_hb_sent = now;
-                make_encrypted_packet (&buf1, randseries, FASTSEC_PKTTYPE_HEARTBEAT, 0);
-            }
-        }
-
-        if (last_hb_recv && now > last_hb_recv + 3) {
-            SHUTRESTART ("timeout - restarting\n");
         }
 
         if (FD_ISSET (devfd, &rd)) {
@@ -906,20 +922,8 @@ int main (int argc, char **argv)
             enum fastsec_result_decrypt err_decrypt;
             enum fastsec_result_avail err_avail = FASTSEC_RESULT_AVAIL_SUCCESS;
             int read_count;
-            struct fastsec fs_, *fs;
-            fs = &fs_;
-            memset (fs, '\0', sizeof (*fs));
 
-            fs->server = (cmdlineopt->co_listen != NULL);
-            fs->devfd = devfd;
-            fs->pkt_recv_count = &pkt_recv_count;
-            fs->non_replay_counter = &buf2.non_replay_counter;
-            fs->aes = &buf2.aes;
-            fs->last_hb_recv = &last_hb_recv;
-            fs->server_ticket_recieved = &server_ticket_recieved;
-            fs->client_close_req_recieved = &client_close_req_recieved;
-
-            err_avail = fastsec_process_ciphertext (fs, buf2.data + buf2.written, buf2.avail - buf2.written, &err_decrypt, now, &read_count);
+            err_avail = fastsec_process_ciphertext (fs, buf2.data + buf2.written, buf2.avail - buf2.written, &err_decrypt, &read_count);
 
             switch (err_avail) {
             case FASTSEC_RESULT_AVAIL_SUCCESS:
@@ -967,9 +971,9 @@ int main (int argc, char **argv)
                 SHUTRESTART ("server write CLIENTCLOSERESPONSE\n");
             }
         }
+
         if (buf2.written == buf2.avail)
             buf2.written = buf2.avail = 0;
-
     }
 
     return 0;

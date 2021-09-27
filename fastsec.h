@@ -26,6 +26,12 @@ enum fastsec_result_avail {
     FASTSEC_RESULT_AVAIL_FAIL_CLIENT_RCVD_CLIENTCLOSEREQ = 260,
 };
 
+enum fastsec_housekeeping_result {
+    FASTSEC_HOUSEKEEPING_RESULT_SUCCESS = 0,
+    FASTSEC_HOUSEKEEPING_RESULT_FAIL_HEARTBEAT_TIMEOUT = 310,
+    FASTSEC_HOUSEKEEPING_RESULT_FAIL_BUF_TOO_SMALL = 320,
+};
+
 #define FASTSEC_CLIENTNAME_MAXLEN               96
 #define FASTSEC_BLOCK_SZ                        16
 #define FASTSEC_KEY_SZ                          32
@@ -106,19 +112,28 @@ int fastsec_encrypt_packet (char *out, uint64_t *non_replay_counter, struct aes_
 int fastsec_set_aeskeys (unsigned char *key1, struct aes_key_st *aes1, unsigned char *key2, struct aes_key_st *aes2);
 void fastsec_init (void);
 
+struct randseries;
+
 struct fastsec {
     int server;
     int devfd;
     uint64_t *pkt_recv_count;
-    uint64_t *non_replay_counter;
-    struct aes_key_st *aes;
+    uint64_t *non_replay_counter_encrypt;
+    uint64_t *non_replay_counter_decrypt;
+    struct randseries *randseries;
+    struct aes_key_st *aes_encrypt;
+    struct aes_key_st *aes_decrypt;
+    time_t *last_hb_sent;
     time_t *last_hb_recv;
     union reconnect_ticket *save_ticket;
     int *server_ticket_recieved;
     int *client_close_req_recieved;
+    int *future_packet_sent;
 };
 
-enum fastsec_result_avail fastsec_process_ciphertext (struct fastsec *fs, char *data, int datalen, enum fastsec_result_decrypt *err_decrypt, time_t now, int *read_count);
+enum fastsec_result_avail fastsec_process_ciphertext (struct fastsec *fs, char *data, int datalen, enum fastsec_result_decrypt *err_decrypt, int *read_count);
+enum fastsec_housekeeping_result fastsec_housekeeping (struct fastsec *fs, char *buf, int buflen, int *result_len);
+
 
 
 

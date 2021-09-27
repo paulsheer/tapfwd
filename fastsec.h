@@ -16,9 +16,28 @@ enum fastsec_result_decrypt {
     FASTSEC_RESULT_DECRYPT_FAIL_REPLAY = 140,
 };
 
+enum fastsec_result_avail {
+    FASTSEC_RESULT_AVAIL_SUCCESS = 0,
+    FASTSEC_RESULT_AVAIL_SUCCESS_NEED_MORE_INPUT = 210,
+    FASTSEC_RESULT_AVAIL_FAIL_LENGTH_TOO_LARGE = 220,
+    FASTSEC_RESULT_AVAIL_FAIL_DECRYPT = 230,
+    FASTSEC_RESULT_AVAIL_FAIL_WRITE = 240,
+    FASTSEC_RESULT_AVAIL_FAIL_CLIENTCLOSERESPONSE_INVALID_PKT_SIZE = 250,
+    FASTSEC_RESULT_AVAIL_FAIL_CLIENT_RCVD_CLIENTCLOSEREQ = 260,
+};
+
 #define FASTSEC_CLIENTNAME_MAXLEN               96
 #define FASTSEC_BLOCK_SZ                        16
 #define FASTSEC_KEY_SZ                          32
+#define FASTSEC_BUF_SIZE                        16384
+
+enum fastsec_packet_type {
+    FASTSEC_PKTTYPE_DATA = 1,
+    FASTSEC_PKTTYPE_HEARTBEAT = 2,
+    FASTSEC_PKTTYPE_CLIENTCLOSEREQ = 3,
+    FASTSEC_PKTTYPE_RESPONSETOCLOSEREQ = 4,
+    FASTSEC_PKTTYPE_FUTURE = 255,
+};
 
 struct reconnect_ticket_ {
     unsigned char ticket[FASTSEC_BLOCK_SZ];
@@ -86,6 +105,22 @@ enum fastsec_result_decrypt fastsec_decrypt_packet (char *in, int len_round, int
 int fastsec_encrypt_packet (char *out, uint64_t *non_replay_counter, struct aes_key_st *aes, struct randseries *s, int pkttype, int len);
 int fastsec_set_aeskeys (unsigned char *key1, struct aes_key_st *aes1, unsigned char *key2, struct aes_key_st *aes2);
 void fastsec_init (void);
+
+struct fastsec {
+    int server;
+    int devfd;
+    uint64_t *pkt_recv_count;
+    uint64_t *non_replay_counter;
+    struct aes_key_st *aes;
+    time_t *last_hb_recv;
+    union reconnect_ticket *save_ticket;
+    int *server_ticket_recieved;
+    int *client_close_req_recieved;
+};
+
+enum fastsec_result_avail fastsec_process_ciphertext (struct fastsec *fs, char *data, int datalen, enum fastsec_result_decrypt *err_decrypt, time_t now, int *read_count);
+
+
 
 
 

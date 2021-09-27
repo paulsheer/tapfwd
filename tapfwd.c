@@ -363,23 +363,6 @@ static int connect_socket (const char *msg, const char *address, int port)
 }
 
 
-static unsigned long long read_uint (const void *in_, int l)
-{
-    unsigned long long v = 0UL;
-    const unsigned char *in;
-    in = (unsigned char *) in_;
-    do {
-        v <<= 8;
-        v |= (*in++ & 0xff);
-    } while (--l);
-    return v;
-}
-
-
-
-#define BUF_SIZE        16384
-
-
 
 static int configure_network (struct cmdlineoption *cmdlineopt)
 {
@@ -414,7 +397,7 @@ static int configure_network (struct cmdlineoption *cmdlineopt)
 struct cryptobuf {
     int avail;
     int written;
-    char data[BUF_SIZE];
+    char data[FASTSEC_BUF_SIZE];
     unsigned char key[FASTSEC_KEY_SZ];
     struct aes_key_st aes;
     uint64_t non_replay_counter;
@@ -852,9 +835,9 @@ int main (int argc, char **argv)
             }
 
         if (!client_close_req_recieved) {
-            SETUP (devfd, rd, BUF_SIZE - buf1.avail, 1500 + FASTSEC_HEADER_SIZE + FASTSEC_TRAILER_SIZE + 256);      /* 256 = fudge */
+            SETUP (devfd, rd, FASTSEC_BUF_SIZE - buf1.avail, 1500 + FASTSEC_HEADER_SIZE + FASTSEC_TRAILER_SIZE + 256);      /* 256 = fudge */
         }
-        SETUP (sock, rd, BUF_SIZE - buf2.avail, 1);
+        SETUP (sock, rd, FASTSEC_BUF_SIZE - buf2.avail, 1);
         SETUP (sock, wr, buf1.avail - buf1.written, 1);
 
         {
@@ -883,27 +866,21 @@ int main (int argc, char **argv)
                         end += r;                                       \
                 }
 
-#define PKTTYPE_DATA                    1
-#define PKTTYPE_HEARTBEAT               2
-#define PKTTYPE_CLIENTCLOSEREQ          3
-#define PKTTYPE_RESPONSETOCLOSEREQ      4
-#define PKTTYPE_FUTURE                  255
-
 
         time (&now);
 
         if (!future_packet_sent) {
-            if (BUF_SIZE - buf1.avail >= (FASTSEC_HEADER_SIZE + 23 + FASTSEC_TRAILER_SIZE)) {
+            if (FASTSEC_BUF_SIZE - buf1.avail >= (FASTSEC_HEADER_SIZE + 23 + FASTSEC_TRAILER_SIZE)) {
                 future_packet_sent = 1;
                 memset (buf1.data + buf1.avail + FASTSEC_HEADER_SIZE, '\0', 23);
-                make_encrypted_packet (&buf1, randseries, PKTTYPE_FUTURE, 23);  /* verify that future packet-types don't terminate the remote end */
+                make_encrypted_packet (&buf1, randseries, FASTSEC_PKTTYPE_FUTURE, 23);  /* verify that future packet-types don't terminate the remote end */
             }
         }
 
         if (!last_hb_sent || now > last_hb_sent) {
-            if (BUF_SIZE - buf1.avail >= (FASTSEC_HEADER_SIZE + FASTSEC_TRAILER_SIZE)) {
+            if (FASTSEC_BUF_SIZE - buf1.avail >= (FASTSEC_HEADER_SIZE + FASTSEC_TRAILER_SIZE)) {
                 last_hb_sent = now;
-                make_encrypted_packet (&buf1, randseries, PKTTYPE_HEARTBEAT, 0);
+                make_encrypted_packet (&buf1, randseries, FASTSEC_PKTTYPE_HEARTBEAT, 0);
             }
         }
 
@@ -913,99 +890,71 @@ int main (int argc, char **argv)
 
         if (FD_ISSET (devfd, &rd)) {
             int r;
-            r = read (devfd, buf1.data + buf1.avail + FASTSEC_HEADER_SIZE, BUF_SIZE - buf1.avail - (FASTSEC_HEADER_SIZE + FASTSEC_TRAILER_SIZE));
+            r = read (devfd, buf1.data + buf1.avail + FASTSEC_HEADER_SIZE, FASTSEC_BUF_SIZE - buf1.avail - (FASTSEC_HEADER_SIZE + FASTSEC_TRAILER_SIZE));
             if (r == -1 && errno_TEMP ()) {
                 /* ignore */
             } else if (r < 1) {
                 fatalerror2 ("read", cmdlineopt->co_dev);
             } else {
-                make_encrypted_packet (&buf1, randseries, PKTTYPE_DATA, r);
+                make_encrypted_packet (&buf1, randseries, FASTSEC_PKTTYPE_DATA, r);
             }
         }
 
-        PROCESS (sock, read, rd, buf2.data, buf2.avail, BUF_SIZE - buf2.avail);
+        PROCESS (sock, read, rd, buf2.data, buf2.avail, FASTSEC_BUF_SIZE - buf2.avail);
 
-        while (buf2.avail - buf2.written > 0) {
-            int buf2_written_;
-            int len_round, len, pkttype;
-            struct header *h;
+        {
+            enum fastsec_result_decrypt err_decrypt;
+            enum fastsec_result_avail err_avail = FASTSEC_RESULT_AVAIL_SUCCESS;
+            int read_count;
+            struct fastsec fs_, *fs;
+            fs = &fs_;
+            memset (fs, '\0', sizeof (*fs));
 
-            buf2_written_ = buf2.written;
+            fs->server = (cmdlineopt->co_listen != NULL);
+            fs->devfd = devfd;
+            fs->pkt_recv_count = &pkt_recv_count;
+            fs->non_replay_counter = &buf2.non_replay_counter;
+            fs->aes = &buf2.aes;
+            fs->last_hb_recv = &last_hb_recv;
+            fs->server_ticket_recieved = &server_ticket_recieved;
+            fs->client_close_req_recieved = &client_close_req_recieved;
 
-            if (buf2.avail - buf2_written_ < FASTSEC_HEADER_SIZE)
-                goto out;
+            err_avail = fastsec_process_ciphertext (fs, buf2.data + buf2.written, buf2.avail - buf2.written, &err_decrypt, now, &read_count);
 
-            h = (struct header *) &buf2.data[buf2_written_];
-            buf2_written_ += FASTSEC_HEADER_SIZE;
-
-            len_round = read_uint (&h->hdr.length, sizeof (h->hdr.length));
-
-            if (len_round > BUF_SIZE - (FASTSEC_HEADER_SIZE + FASTSEC_ROUND (0) + FASTSEC_TRAILER_SIZE))
-                SHUTRESTART ("bad length\n");
-
-            if (buf2.avail - buf2_written_ < len_round + FASTSEC_TRAILER_SIZE) {
-              out:
+            switch (err_avail) {
+            case FASTSEC_RESULT_AVAIL_SUCCESS:
+                buf2.written += read_count;
+                break;
+            case FASTSEC_RESULT_AVAIL_SUCCESS_NEED_MORE_INPUT:
+                buf2.written += read_count;
                 memmove (buf2.data, buf2.data + buf2.written, buf2.avail - buf2.written);
                 buf2.avail -= buf2.written;
                 buf2.written = 0;
                 break;
-            }
-
-            switch (fastsec_decrypt_packet (&buf2.data[buf2.written], len_round, &pkttype, &buf2.non_replay_counter, &buf2.aes, &len)) {
-            case FASTSEC_RESULT_DECRYPT_SUCCESS:
-                break;
-            case FASTSEC_RESULT_DECRYPT_FAIL_PKTTYPE:
-                SHUTRESTART ("packet type check failed\n");
-            case FASTSEC_RESULT_DECRYPT_FAIL_LEN:
-                SHUTRESTART ("length len check failed\n");
-            case FASTSEC_RESULT_DECRYPT_FAIL_CHKSUM:
-                SHUTRESTART ("checksum failed\n");
-            case FASTSEC_RESULT_DECRYPT_FAIL_REPLAY:
-                SHUTRESTART ("replay attack detected\n");
-            }
-
-            pkt_recv_count++;
-
-            switch (pkttype) {
-            case PKTTYPE_DATA:
-                {
-                    int r;
-                    r = write (devfd, buf2.data + buf2_written_, len);
-                    if (r < 0 && errno_TEMP ()) {
-                        /* ok */
-                    } else if (r <= 0) {
-                        SHUTRESTART ("writedev error - restarting\n");
-                    }
+            case FASTSEC_RESULT_AVAIL_FAIL_LENGTH_TOO_LARGE:
+                SHUTRESTART ("bad length\n");
+            case FASTSEC_RESULT_AVAIL_FAIL_DECRYPT:
+                switch (err_decrypt) {
+                case FASTSEC_RESULT_DECRYPT_SUCCESS:
+                    assert (!"not possible");
+                    break;
+                case FASTSEC_RESULT_DECRYPT_FAIL_PKTTYPE:
+                    SHUTRESTART ("packet type check failed\n");
+                case FASTSEC_RESULT_DECRYPT_FAIL_LEN:
+                    SHUTRESTART ("length len check failed\n");
+                case FASTSEC_RESULT_DECRYPT_FAIL_CHKSUM:
+                    SHUTRESTART ("checksum failed\n");
+                case FASTSEC_RESULT_DECRYPT_FAIL_REPLAY:
+                    SHUTRESTART ("replay attack detected\n");
                 }
                 break;
-            case PKTTYPE_HEARTBEAT:
-                last_hb_recv = now;
-                break;
-            case PKTTYPE_RESPONSETOCLOSEREQ:
-                if (len != sizeof(save_ticket)) {
-                    SHUTRESTART ("client received CLIENTCLOSERESPONSE invalid packet size\n");
-                }
-                server_ticket_recieved = 1;
-                memcpy (&save_ticket, buf2.data + buf2_written_, len);
-                save_ticket.d.utc_seconds = read_uint (&save_ticket.d.utc_seconds, sizeof (save_ticket.d.utc_seconds));
-                SHUTRESTART ("client received CLIENTCLOSERESPONSE, ok\n");
-                break;
-            case PKTTYPE_CLIENTCLOSEREQ:
-                if (cmdlineopt->co_listen) {
-                    union reconnect_ticket ticket;
-                    client_close_req_recieved = 1;
-                    fastsec_construct_ticket (&ticket);
-                    memcpy (buf1.data + buf1.avail + FASTSEC_HEADER_SIZE, &ticket, sizeof(ticket));
-                    make_encrypted_packet (&buf1, randseries, PKTTYPE_RESPONSETOCLOSEREQ, FASTSEC_BLOCK_SZ);
-                } else {
-                    SHUTRESTART ("client received invalid packet CLIENTCLOSEREQ\n");
-                }
-                break;
-            default:
-                /* ignore unknown packet types for future versions */
-                break;
+            case FASTSEC_RESULT_AVAIL_FAIL_WRITE:
+                SHUTRESTART ("writedev error - restarting\n");
+            case FASTSEC_RESULT_AVAIL_FAIL_CLIENTCLOSERESPONSE_INVALID_PKT_SIZE:
+                SHUTRESTART ("client received CLIENTCLOSERESPONSE invalid packet size\n");
+            case FASTSEC_RESULT_AVAIL_FAIL_CLIENT_RCVD_CLIENTCLOSEREQ:
+                SHUTRESTART ("client received invalid packet CLIENTCLOSEREQ\n");
             }
-            buf2.written = buf2_written_ + len_round + FASTSEC_TRAILER_SIZE;
         }
 
         PROCESS (sock, write, wr, buf1.data, buf1.written, buf1.avail - buf1.written);

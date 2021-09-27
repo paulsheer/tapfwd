@@ -822,6 +822,84 @@ void fastsec_construct_ticket (union reconnect_ticket *ticket)
     write_uint (&ticket->d.utc_seconds, expire_time, sizeof (ticket->d.utc_seconds));
 }
 
+enum fastsec_result_avail fastsec_avail (struct fastsec *fs, char *data, int datalen, enum fastsec_result_decrypt *err_decrypt, time_t now, int *read_count)
+{
+    *read_count = 0;
+
+    while (datalen > 0) {
+        int len_round, len, pkttype;
+        enum fastsec_result_decrypt err;
+        struct header *h;
+
+        if (datalen < FASTSEC_HEADER_SIZE)
+            return FASTSEC_RESULT_AVAIL_SUCCESS_NEED_MORE_INPUT;
+
+        h = (struct header *) data;
+
+        len_round = read_uint (&h->hdr.length, sizeof (h->hdr.length));
+
+        if (len_round > FASTSEC_BUF_SIZE - (FASTSEC_HEADER_SIZE + FASTSEC_ROUND (0) + FASTSEC_TRAILER_SIZE))
+            return FASTSEC_RESULT_AVAIL_FAIL_LENGTH_TOO_LARGE;
+
+        if (datalen < FASTSEC_HEADER_SIZE + len_round + FASTSEC_TRAILER_SIZE)
+            return FASTSEC_RESULT_AVAIL_SUCCESS_NEED_MORE_INPUT;
+
+        switch ((err = fastsec_decrypt_packet (data, len_round, &pkttype, fs->non_replay_counter, fs->aes, &len))) {
+        case FASTSEC_RESULT_DECRYPT_SUCCESS:
+            break;
+        default:
+            *err_decrypt = err;
+            return FASTSEC_RESULT_AVAIL_FAIL_DECRYPT;
+        }
+
+        (*fs->pkt_recv_count)++;
+
+        switch (pkttype) {
+        case FASTSEC_PKTTYPE_DATA:
+            {
+                int r;
+                r = write (fs->devfd, data + FASTSEC_HEADER_SIZE, len);
+                if (r < 0 && errno_TEMP ()) {
+                    /* ok */
+                } else if (r <= 0) {
+                    return FASTSEC_RESULT_AVAIL_FAIL_WRITE;
+                }
+            }
+            break;
+        case FASTSEC_PKTTYPE_HEARTBEAT:
+            *fs->last_hb_recv = now;
+            break;
+        case FASTSEC_PKTTYPE_RESPONSETOCLOSEREQ:
+            if (len != sizeof (*fs->save_ticket))
+                return FASTSEC_RESULT_AVAIL_FAIL_CLIENTCLOSERESPONSE_INVALID_PKT_SIZE;
+            *fs->server_ticket_recieved = 1;
+            memcpy (fs->save_ticket, data + FASTSEC_HEADER_SIZE, sizeof (*fs->save_ticket));
+            fs->save_ticket->d.utc_seconds = read_uint (&fs->save_ticket->d.utc_seconds, sizeof (fs->save_ticket->d.utc_seconds));
+printf ("TBD\n");
+return FASTSEC_RESULT_AVAIL_SUCCESS;
+            break;
+        case FASTSEC_PKTTYPE_CLIENTCLOSEREQ:
+            if (fs->server) {
+                union reconnect_ticket ticket;
+                *fs->client_close_req_recieved = 1;
+                fastsec_construct_ticket (&ticket);
+                memcpy (data + FASTSEC_HEADER_SIZE, &ticket, sizeof (ticket));
+printf ("TBD\n");
+//                 make_encrypted_packet (&buf1, randseries, FASTSEC_PKTTYPE_RESPONSETOCLOSEREQ, FASTSEC_BLOCK_SZ);
+            } else {
+                return FASTSEC_RESULT_AVAIL_FAIL_CLIENT_RCVD_CLIENTCLOSEREQ;
+            }
+            break;
+        default:
+            /* ignore unknown packet types for future versions */
+            break;
+        }
+        data += FASTSEC_HEADER_SIZE + len_round + FASTSEC_TRAILER_SIZE;
+        (*read_count) += FASTSEC_HEADER_SIZE + len_round + FASTSEC_TRAILER_SIZE;
+        datalen -= FASTSEC_HEADER_SIZE + len_round + FASTSEC_TRAILER_SIZE;
+    }
+    return FASTSEC_RESULT_AVAIL_SUCCESS;
+}
 
 
 

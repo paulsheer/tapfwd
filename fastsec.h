@@ -20,6 +20,16 @@ enum fastsec_result_decrypt {
 #define FASTSEC_BLOCK_SZ                        16
 #define FASTSEC_KEY_SZ                          32
 
+struct reconnect_ticket_ {
+    unsigned char ticket[FASTSEC_BLOCK_SZ];
+    uint64_t utc_seconds;
+};
+
+union reconnect_ticket {
+    struct reconnect_ticket_ d;
+    unsigned char blocks[FASTSEC_BLOCK_SZ * 2];
+};
+
 struct fastsec_keyexchange_info {
     int fd_remotepubkey;
     int fd_privkey;
@@ -33,6 +43,7 @@ struct fastsec_keyexchange_info {
     const char *privkey_fname;
     const char *clientname;
     const char *remotename;
+    union reconnect_ticket *reconnect_ticket;
 };
 
 enum fastsec_result fastsec_keyexchange (struct fastsec_keyexchange_info *info, struct randseries *randseries, char *errmsg, unsigned char *key1, unsigned char *key2);
@@ -41,6 +52,8 @@ int fastsec_retrievepubkey (const char *privkey_fname, const char *pubkey_fname,
 int fastsec_validateclientname (const char *clientname);
 void fastsec_aesoneblock (const unsigned char *key, int key_len, const unsigned char *in, unsigned char *out);
 
+
+void fastsec_construct_ticket (union reconnect_ticket *ticket);
 
 struct pkthdr {
     unsigned char pkttype;

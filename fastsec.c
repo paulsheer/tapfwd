@@ -810,3 +810,18 @@ enum fastsec_result_decrypt fastsec_decrypt_packet (char *in, int len_round, int
     return FASTSEC_RESULT_DECRYPT_SUCCESS;
 }
 
+void fastsec_construct_ticket (union reconnect_ticket *ticket)
+{
+    unsigned long long expire_time;
+    memset (ticket, '\0', sizeof (*ticket));
+
+/* construct ticket */
+
+    expire_time = time(NULL);
+    expire_time += 30 * 60;
+    write_uint (&ticket->d.utc_seconds, expire_time, sizeof (ticket->d.utc_seconds));
+}
+
+
+
+

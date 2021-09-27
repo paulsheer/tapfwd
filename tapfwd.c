@@ -607,6 +607,9 @@ int main (int argc, char **argv)
     time_t last_hb_sent, last_hb_recv, now;
     int future_packet_sent = 0;
     uint64_t pkt_recv_count;
+    int client_close_req_recieved = 0;
+    int server_ticket_recieved = 0;
+    union reconnect_ticket save_ticket;
     int devfd, sock = -1, h = -1;
     struct iprange_list *iprange = NULL;
     struct randseries *randseries;
@@ -772,7 +775,13 @@ int main (int argc, char **argv)
     fsinfo.privkey_fname = privkey_fname;
     fsinfo.clientname = cmdlineopt->co_clientname;
     fsinfo.remotename = cmdlineopt->co_remote;
+    fsinfo.reconnect_ticket = NULL;
     fsinfo.sock = sock;
+
+    if (server_ticket_recieved && time (NULL) < (time_t) save_ticket.d.utc_seconds) {
+        server_ticket_recieved = 0;
+        fsinfo.reconnect_ticket = &save_ticket;
+    }
 
     {
         long long t1, t2;
@@ -842,7 +851,9 @@ int main (int argc, char **argv)
                 nfds = max(nfds, fd);                           \
             }
 
-        SETUP (devfd, rd, BUF_SIZE - buf1.avail, 1500 + FASTSEC_HEADER_SIZE + FASTSEC_TRAILER_SIZE + 256);      /* 256 = fudge */
+        if (!client_close_req_recieved) {
+            SETUP (devfd, rd, BUF_SIZE - buf1.avail, 1500 + FASTSEC_HEADER_SIZE + FASTSEC_TRAILER_SIZE + 256);      /* 256 = fudge */
+        }
         SETUP (sock, rd, BUF_SIZE - buf2.avail, 1);
         SETUP (sock, wr, buf1.avail - buf1.written, 1);
 
@@ -872,9 +883,11 @@ int main (int argc, char **argv)
                         end += r;                                       \
                 }
 
-#define PKTTYPE_DATA            1
-#define PKTTYPE_HEARTBEAT       2
-#define PKTTYPE_FUTURE          255
+#define PKTTYPE_DATA                    1
+#define PKTTYPE_HEARTBEAT               2
+#define PKTTYPE_CLIENTCLOSEREQ          3
+#define PKTTYPE_RESPONSETOCLOSEREQ      4
+#define PKTTYPE_FUTURE                  255
 
 
         time (&now);
@@ -968,6 +981,26 @@ int main (int argc, char **argv)
             case PKTTYPE_HEARTBEAT:
                 last_hb_recv = now;
                 break;
+            case PKTTYPE_RESPONSETOCLOSEREQ:
+                if (len != sizeof(save_ticket)) {
+                    SHUTRESTART ("client received CLIENTCLOSERESPONSE invalid packet size\n");
+                }
+                server_ticket_recieved = 1;
+                memcpy (&save_ticket, buf2.data + buf2_written_, len);
+                save_ticket.d.utc_seconds = read_uint (&save_ticket.d.utc_seconds, sizeof (save_ticket.d.utc_seconds));
+                SHUTRESTART ("client received CLIENTCLOSERESPONSE, ok\n");
+                break;
+            case PKTTYPE_CLIENTCLOSEREQ:
+                if (cmdlineopt->co_listen) {
+                    union reconnect_ticket ticket;
+                    client_close_req_recieved = 1;
+                    fastsec_construct_ticket (&ticket);
+                    memcpy (buf1.data + buf1.avail + FASTSEC_HEADER_SIZE, &ticket, sizeof(ticket));
+                    make_encrypted_packet (&buf1, randseries, PKTTYPE_RESPONSETOCLOSEREQ, FASTSEC_BLOCK_SZ);
+                } else {
+                    SHUTRESTART ("client received invalid packet CLIENTCLOSEREQ\n");
+                }
+                break;
             default:
                 /* ignore unknown packet types for future versions */
                 break;
@@ -978,8 +1011,13 @@ int main (int argc, char **argv)
         PROCESS (sock, write, wr, buf1.data, buf1.written, buf1.avail - buf1.written);
 
         /* check if write data has caught read data */
-        if (buf1.written == buf1.avail)
+        if (buf1.written == buf1.avail) {
             buf1.written = buf1.avail = 0;
+            if (client_close_req_recieved) {
+                assert (cmdlineopt->co_listen);
+                SHUTRESTART ("server write CLIENTCLOSERESPONSE\n");
+            }
+        }
         if (buf2.written == buf2.avail)
             buf2.written = buf2.avail = 0;
 

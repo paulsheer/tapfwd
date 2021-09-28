@@ -399,15 +399,8 @@ struct cryptobuf {
     int written;
     char data[FASTSEC_BUF_SIZE];
     unsigned char key[FASTSEC_KEY_SZ];
-    struct aes_key_st aes;
-    uint64_t non_replay_counter;
 };
 
-
-static void make_encrypted_packet (struct cryptobuf *buf, struct randseries *s, int pkttype, int len)
-{
-    buf->avail += fastsec_encrypt_packet (&buf->data[buf->avail], &buf->non_replay_counter, &buf->aes, s, pkttype, len);
-}
 
 
 static void print_help (void)
@@ -583,6 +576,23 @@ unsigned long hash_str (const char *s)
     return c;
 }
 
+static int process_plaintext (void *user_data1, void *user_data2, char *data, int len)
+{
+    int *fd_;
+    int fd, r;
+    assert (user_data1);
+    assert (!user_data2);
+    fd_ = (int *) user_data1;
+    fd = (int) *fd_;
+    r = write (fd, data, len);
+    if (r < 0 && errno_TEMP ()) {
+        /* ok */
+    } else if (r <= 0) {
+        return 1;
+    }
+    return 0;
+}
+
 int main (int argc, char **argv)
 {
     struct fastsec fs_, *fs;
@@ -590,7 +600,6 @@ int main (int argc, char **argv)
     struct cmdlineoption *cmdlineopt;
     time_t last_hb_sent, last_hb_recv;
     int future_packet_sent = 0;
-    uint64_t pkt_recv_count;
     int client_close_req_recieved = 0;
     int server_ticket_recieved = 0;
     union reconnect_ticket save_ticket;
@@ -688,7 +697,7 @@ int main (int argc, char **argv)
 
 #define RESTART \
     do { \
-        if (pkt_recv_count < 1UL) \
+        if (fs->pkt_recv_count < 1UL) \
              sleep (2); \
         goto restart; \
     } while (0)
@@ -707,25 +716,20 @@ int main (int argc, char **argv)
     fs = &fs_;
     memset (fs, '\0', sizeof (*fs));
 
-    fs->aes_encrypt = &buf1.aes;
-    fs->aes_decrypt = &buf2.aes;
     fs->client_close_req_recieved = &client_close_req_recieved;
-    fs->devfd = devfd;
+    fs->process_plaintext = process_plaintext;
+    fs->user_data1 = (void *) &devfd;
     fs->future_packet_sent = &future_packet_sent;
     fs->last_hb_recv = &last_hb_recv;
     fs->last_hb_sent = &last_hb_sent;
-    fs->non_replay_counter_encrypt = &buf1.non_replay_counter;
-    fs->non_replay_counter_decrypt = &buf2.non_replay_counter;
-    fs->pkt_recv_count = &pkt_recv_count;
+    fs->pkt_recv_count = 0UL;
     fs->randseries = randseries;
     fs->server = (cmdlineopt->co_listen != NULL);
     fs->server_ticket_recieved = &server_ticket_recieved;
 
-    pkt_recv_count = 0UL;
-
     buf1.avail = buf2.avail = 0;
     buf1.written = buf2.written = 0;
-    buf1.non_replay_counter = buf2.non_replay_counter = 0x5555555555555555ULL;
+    fs->non_replay_counter_encrypt = fs->non_replay_counter_decrypt = 0x5555555555555555ULL;
     last_hb_sent = last_hb_recv = 0L;
     assert (sock == -1);
 
@@ -820,7 +824,7 @@ int main (int argc, char **argv)
         break;
     }
 
-    if (fastsec_set_aeskeys (buf1.key, &buf1.aes, buf2.key, &buf2.aes)) {
+    if (fastsec_set_aeskeys (buf1.key, &fs->aes_encrypt, buf2.key, &fs->aes_decrypt)) {
         fprintf (stderr, "error: failure setting key\n");
         exit (1);
     }
@@ -912,7 +916,7 @@ int main (int argc, char **argv)
             } else if (r < 1) {
                 fatalerror2 ("read", cmdlineopt->co_dev);
             } else {
-                make_encrypted_packet (&buf1, randseries, FASTSEC_PKTTYPE_DATA, r);
+                buf1.avail += fastsec_encrypt_packet (&buf1.data[buf1.avail], &fs->non_replay_counter_encrypt, &fs->aes_encrypt, randseries, FASTSEC_PKTTYPE_DATA, r);
             }
         }
 
@@ -952,7 +956,7 @@ int main (int argc, char **argv)
                     SHUTRESTART ("replay attack detected\n");
                 }
                 break;
-            case FASTSEC_RESULT_AVAIL_FAIL_WRITE:
+            case FASTSEC_RESULT_AVAIL_FAIL_PROCESS_PLAINTEXT:
                 SHUTRESTART ("writedev error - restarting\n");
             case FASTSEC_RESULT_AVAIL_FAIL_CLIENTCLOSERESPONSE_INVALID_PKT_SIZE:
                 SHUTRESTART ("client received CLIENTCLOSERESPONSE invalid packet size\n");

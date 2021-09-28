@@ -1,5 +1,6 @@
 
 struct randseries;
+struct fastsec ;
 
 enum fastsec_result {
     FASTSEC_RESULT_SUCCESS = 0,
@@ -21,7 +22,7 @@ enum fastsec_result_avail {
     FASTSEC_RESULT_AVAIL_SUCCESS_NEED_MORE_INPUT = 210,
     FASTSEC_RESULT_AVAIL_FAIL_LENGTH_TOO_LARGE = 220,
     FASTSEC_RESULT_AVAIL_FAIL_DECRYPT = 230,
-    FASTSEC_RESULT_AVAIL_FAIL_WRITE = 240,
+    FASTSEC_RESULT_AVAIL_FAIL_PROCESS_PLAINTEXT = 240,
     FASTSEC_RESULT_AVAIL_FAIL_CLIENTCLOSERESPONSE_INVALID_PKT_SIZE = 250,
     FASTSEC_RESULT_AVAIL_FAIL_CLIENT_RCVD_CLIENTCLOSEREQ = 260,
 };
@@ -114,15 +115,19 @@ void fastsec_init (void);
 
 struct randseries;
 
+typedef int (*fastsec_process_plaintext_cb_t) (void *user_data1, void *user_data2, char *data, int len);
+
 struct fastsec {
     int server;
-    int devfd;
-    uint64_t *pkt_recv_count;
-    uint64_t *non_replay_counter_encrypt;
-    uint64_t *non_replay_counter_decrypt;
+    fastsec_process_plaintext_cb_t process_plaintext;
+    void *user_data1;
+    void *user_data2;
+    uint64_t pkt_recv_count;
+    uint64_t non_replay_counter_encrypt;
+    uint64_t non_replay_counter_decrypt;
     struct randseries *randseries;
-    struct aes_key_st *aes_encrypt;
-    struct aes_key_st *aes_decrypt;
+    struct aes_key_st aes_encrypt;
+    struct aes_key_st aes_decrypt;
     time_t *last_hb_sent;
     time_t *last_hb_recv;
     union reconnect_ticket *save_ticket;
@@ -133,6 +138,7 @@ struct fastsec {
 
 enum fastsec_result_avail fastsec_process_ciphertext (struct fastsec *fs, char *data, int datalen, enum fastsec_result_decrypt *err_decrypt, int *read_count);
 enum fastsec_housekeeping_result fastsec_housekeeping (struct fastsec *fs, char *buf, int buflen, int *result_len);
+
 
 
 

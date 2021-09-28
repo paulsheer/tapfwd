@@ -852,7 +852,7 @@ enum fastsec_result_avail fastsec_process_ciphertext (struct fastsec *fs, char *
         if (datalen < FASTSEC_HEADER_SIZE + len_round + FASTSEC_TRAILER_SIZE)
             return FASTSEC_RESULT_AVAIL_SUCCESS_NEED_MORE_INPUT;
 
-        switch ((err = fastsec_decrypt_packet (data, len_round, &pkttype, fs->non_replay_counter_decrypt, fs->aes_decrypt, &len))) {
+        switch ((err = fastsec_decrypt_packet (data, len_round, &pkttype, &fs->non_replay_counter_decrypt, &fs->aes_decrypt, &len))) {
         case FASTSEC_RESULT_DECRYPT_SUCCESS:
             break;
         default:
@@ -860,19 +860,12 @@ enum fastsec_result_avail fastsec_process_ciphertext (struct fastsec *fs, char *
             return FASTSEC_RESULT_AVAIL_FAIL_DECRYPT;
         }
 
-        (*fs->pkt_recv_count)++;
+        fs->pkt_recv_count++;
 
         switch (pkttype) {
         case FASTSEC_PKTTYPE_DATA:
-            {
-                int r;
-                r = write (fs->devfd, data + FASTSEC_HEADER_SIZE, len);
-                if (r < 0 && errno_TEMP ()) {
-                    /* ok */
-                } else if (r <= 0) {
-                    return FASTSEC_RESULT_AVAIL_FAIL_WRITE;
-                }
-            }
+            if ((*fs->process_plaintext) (fs->user_data1, fs->user_data2, data + FASTSEC_HEADER_SIZE, len))
+                return FASTSEC_RESULT_AVAIL_FAIL_PROCESS_PLAINTEXT;
             break;
         case FASTSEC_PKTTYPE_HEARTBEAT:
             *fs->last_hb_recv = now;
@@ -928,12 +921,12 @@ enum fastsec_housekeeping_result fastsec_housekeeping (struct fastsec *fs, char 
         *fs->future_packet_sent = 1;
         memset (&buf[FASTSEC_HEADER_SIZE], '\0', 23);
 /* verify that future packet-types don't terminate the remote end */
-        *result_len += fastsec_encrypt_packet (&buf[*result_len], fs->non_replay_counter_encrypt, fs->aes_encrypt, fs->randseries, FASTSEC_PKTTYPE_FUTURE, 23);
+        *result_len += fastsec_encrypt_packet (&buf[*result_len], &fs->non_replay_counter_encrypt, &fs->aes_encrypt, fs->randseries, FASTSEC_PKTTYPE_FUTURE, 23);
     }
 
     if (!*fs->last_hb_sent || now > *fs->last_hb_sent) {
         *fs->last_hb_sent = now;
-        *result_len += fastsec_encrypt_packet (&buf[*result_len], fs->non_replay_counter_encrypt, fs->aes_encrypt, fs->randseries, FASTSEC_PKTTYPE_HEARTBEAT, 0);
+        *result_len += fastsec_encrypt_packet (&buf[*result_len], &fs->non_replay_counter_encrypt, &fs->aes_encrypt, fs->randseries, FASTSEC_PKTTYPE_HEARTBEAT, 0);
     }
 
     assert (buf[maxlen - 1] == '~');

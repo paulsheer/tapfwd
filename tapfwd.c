@@ -28,7 +28,6 @@
 #include "aes.h"
 #include "ipv6scan.h"
 #include "fastsec.h"
-#include "randseries.h"
 
 
 
@@ -598,25 +597,13 @@ int main (int argc, char **argv)
     struct fastsec fs_, *fs;
     struct cmdlineoption cmdlineopt_;
     struct cmdlineoption *cmdlineopt;
-    time_t last_hb_sent, last_hb_recv;
-    int future_packet_sent = 0;
-    int client_close_req_recieved = 0;
-    int server_ticket_recieved = 0;
     union reconnect_ticket save_ticket;
     int devfd, sock = -1, h = -1;
     struct iprange_list *iprange = NULL;
-    struct randseries *randseries;
     struct cryptobuf buf1, buf2;
-    struct fastsec_keyexchange_info fsinfo;
     enum fastsec_result fr;
     char errmsg[256];
-    const char *privkey_fname = "/var/tmp/tapfwd-ecurve-private-key.dat";
-    const char *remotepubkey_fname = "/var/tmp/tapfwd-ecurve-remote-public-key.dat";
-    const char *pubkey_fname = "/var/tmp/tapfwd-ecurve-public-key.dat";
 
-    fastsec_init ();
-
-    randseries = randseries_new (FASTSEC_KEY_SZ);
 
     cmdlineopt = &cmdlineopt_;
     cmdlineoption_setdefaults (cmdlineopt);
@@ -630,9 +617,28 @@ int main (int argc, char **argv)
         }
     }
 
+    fs = &fs_;
+
+    switch (fastsec_init (fs)) {
+    case FASTSEC_INIT_RESULT_SUCCESS:
+        break;
+    case FASTSEC_INIT_RESULT_FAIL_PRIVKEY:
+        fatalerror (fs->privkey_fname);
+        break;
+    case FASTSEC_INIT_RESULT_FAIL_REMOTEPUBKEY:
+        fatalerror (fs->pubkey_fname);
+        break;
+    case FASTSEC_INIT_RESULT_FAIL_PUBKEY:
+        fatalerror (fs->pubkey_fname);
+        break;
+    }
+
+    fs->process_plaintext = process_plaintext;
+    fs->user_data1 = (void *) &devfd;
+
     if (cmdlineopt->co_pubkey) {
         char w[1024];
-        if (fastsec_retrievepubkey (privkey_fname, pubkey_fname, randseries, w, sizeof (w), errmsg)) {
+        if (fastsec_retrievepubkey (fs, w, sizeof (w), errmsg)) {
             fprintf (stderr, "error: %s\n", errmsg);
             exit (1);
         }
@@ -674,15 +680,6 @@ int main (int argc, char **argv)
         }
     }
 
-    memset (&fsinfo, '\0', sizeof (fsinfo));
-
-    if ((fsinfo.fd_privkey = open (privkey_fname, O_RDWR | O_CREAT, 0600)) == -1)
-        fatalerror (privkey_fname);
-    if ((fsinfo.fd_remotepubkey = open (remotepubkey_fname, O_RDWR | O_CREAT, 0644)) == -1)
-        fatalerror (remotepubkey_fname);
-    if ((fsinfo.fd_pubkey = open (pubkey_fname, O_RDWR | O_CREAT, 0644)) == -1)
-        fatalerror (pubkey_fname);
-
     devfd = configure_network (cmdlineopt);
 
     setup_sig_handlers ();
@@ -712,25 +709,11 @@ int main (int argc, char **argv)
 
   restart:
 
-
-    fs = &fs_;
-    memset (fs, '\0', sizeof (*fs));
-
-    fs->client_close_req_recieved = &client_close_req_recieved;
-    fs->process_plaintext = process_plaintext;
-    fs->user_data1 = (void *) &devfd;
-    fs->future_packet_sent = &future_packet_sent;
-    fs->last_hb_recv = &last_hb_recv;
-    fs->last_hb_sent = &last_hb_sent;
-    fs->pkt_recv_count = 0UL;
-    fs->randseries = randseries;
-    fs->server = (cmdlineopt->co_listen != NULL);
-    fs->server_ticket_recieved = &server_ticket_recieved;
+    fastsec_reconnect (fs);
 
     buf1.avail = buf2.avail = 0;
     buf1.written = buf2.written = 0;
-    fs->non_replay_counter_encrypt = fs->non_replay_counter_decrypt = 0x5555555555555555ULL;
-    last_hb_sent = last_hb_recv = 0L;
+
     assert (sock == -1);
 
     if (cmdlineopt->co_listen) {
@@ -768,37 +751,37 @@ int main (int argc, char **argv)
         }
     }
 
-    fsinfo.server_mode = (cmdlineopt->co_listen != NULL);
-    if (fsinfo.server_mode)
-        fsinfo.auth_mode = 1;
-    if (cmdlineopt->co_auth)
-        fsinfo.auth_mode = 1;
-    if (cmdlineopt->co_noauth)
-        fsinfo.auth_mode = 0;
-    fsinfo.no_store = cmdlineopt->co_nostore;
-    fsinfo.remotepubkey_fname = remotepubkey_fname;
-    fsinfo.pubkey_fname = pubkey_fname;
-    fsinfo.privkey_fname = privkey_fname;
-    fsinfo.clientname = cmdlineopt->co_clientname;
-    fsinfo.remotename = cmdlineopt->co_remote;
-    fsinfo.reconnect_ticket = NULL;
-    fsinfo.sock = sock;
+    fastsec_set_mode (fs, cmdlineopt->co_listen ? FASTSEC_MODE_SERVER : FASTSEC_MODE_CLIENT);
 
-    if (server_ticket_recieved && time (NULL) < (time_t) save_ticket.d.utc_seconds) {
-        server_ticket_recieved = 0;
-        fsinfo.reconnect_ticket = &save_ticket;
+    if (cmdlineopt->co_auth)
+        fastsec_set_strict_auth (fs, FASTSEC_MODE_AUTH_REJECT_UNKNOWN_PEERS);
+
+    if (cmdlineopt->co_noauth)
+        fastsec_set_strict_auth (fs, FASTSEC_MODE_AUTH_ALLOW_UNKNOWN_PEERS);
+
+    fs->no_store = cmdlineopt->co_nostore;
+    if (!fs->server_mode) {
+        fs->clientname = cmdlineopt->co_clientname;
+        fs->remotename = cmdlineopt->co_remote;
+    }
+    fs->reconnect_ticket = NULL;
+    fs->sock = sock;
+
+    if (fs->server_ticket_recieved && time (NULL) < (time_t) save_ticket.d.utc_seconds) {
+        fs->server_ticket_recieved = 0;
+        fs->reconnect_ticket = &save_ticket;
     }
 
     {
         long long t1, t2;
         t1 = microtime ();
-        fr = fastsec_keyexchange (&fsinfo, randseries, errmsg, buf1.key, buf2.key);
+        fr = fastsec_keyexchange (fs, errmsg, buf1.key, buf2.key);
         t2 = microtime ();
         printf ("handshake completed in %lld.%01lld ms\n", (t2 - t1) / 1000, ((t2 - t1) % 1000) / 100);
     }
 
     if (fr != FASTSEC_RESULT_SUCCESS) {
-        if (fsinfo.server_mode) {
+        if (fs->server_mode) {
             static unsigned char once_[65536];
             unsigned int hash;
             hash = hash_str (errmsg) % (65536 * 8 - 1);
@@ -857,7 +840,7 @@ int main (int argc, char **argv)
                 nfds = max(nfds, fd);                           \
             }
 
-        if (!client_close_req_recieved) {
+        if (!fs->client_close_req_recieved) {
             SETUP (devfd, rd, FASTSEC_BUF_SIZE - buf1.avail, 1500 + FASTSEC_HEADER_SIZE + FASTSEC_TRAILER_SIZE + 256);      /* 256 = fudge */
         }
         SETUP (sock, rd, FASTSEC_BUF_SIZE - buf2.avail, 1);
@@ -916,7 +899,7 @@ int main (int argc, char **argv)
             } else if (r < 1) {
                 fatalerror2 ("read", cmdlineopt->co_dev);
             } else {
-                buf1.avail += fastsec_encrypt_packet (&buf1.data[buf1.avail], &fs->non_replay_counter_encrypt, &fs->aes_encrypt, randseries, FASTSEC_PKTTYPE_DATA, r);
+                buf1.avail += fastsec_encrypt_packet (fs, &buf1.data[buf1.avail], FASTSEC_PKTTYPE_DATA, r);
             }
         }
 
@@ -970,7 +953,7 @@ int main (int argc, char **argv)
         /* check if write data has caught read data */
         if (buf1.written == buf1.avail) {
             buf1.written = buf1.avail = 0;
-            if (client_close_req_recieved) {
+            if (fs->client_close_req_recieved) {
                 assert (cmdlineopt->co_listen);
                 SHUTRESTART ("server write CLIENTCLOSERESPONSE\n");
             }

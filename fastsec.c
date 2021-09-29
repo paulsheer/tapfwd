@@ -487,8 +487,7 @@ void fastsec_runcurvetests (void)
     test_curve25519 ();
 }
 
-int fastsec_retrievepubkey (const char *privkey_fname, const char *pubkey_fname, struct randseries *randseries, char *out, int outlen,
-                            char *errmsg)
+int fastsec_retrievepubkey (struct fastsec *fs, char *out, int outlen, char *errmsg)
 {
     int fd_privkey = -1;
     int fd_pubkey = -1;
@@ -496,22 +495,22 @@ int fastsec_retrievepubkey (const char *privkey_fname, const char *pubkey_fname,
     struct eckey privkey;
 
     memset (out, '\0', outlen);
-    if ((fd_privkey = open (privkey_fname, O_RDWR | O_CREAT, 0600)) == -1) {
+    if ((fd_privkey = open (fs->privkey_fname, O_RDWR | O_CREAT, 0600)) == -1) {
         /* this means we don't access (not running as root), so we should
          * just read the public key from its file: */
         FILE *f;
-        printf ("%s: %s\n", privkey_fname, strerror (errno));
-        f = fopen (pubkey_fname, "r");
+        printf ("%s: %s\n", fs->privkey_fname, strerror (errno));
+        f = fopen (fs->pubkey_fname, "r");
         if (!f) {
-            err_sprintf (errmsg, "%s: %s", pubkey_fname, strerror (errno));
+            err_sprintf (errmsg, "%s: %s", fs->pubkey_fname, strerror (errno));
             return 1;
         }
         if (!fgets (out, outlen, f)) {
-            err_sprintf (errmsg, "%s: short read", pubkey_fname);
+            err_sprintf (errmsg, "%s: short read", fs->pubkey_fname);
             return 1;
         }
         if (strlen (out) <= CURVE_KEYLEN_BOTH * 2) {
-            err_sprintf (errmsg, "%s: short file", pubkey_fname);
+            err_sprintf (errmsg, "%s: short file", fs->pubkey_fname);
             return 1;
         }
     } else {
@@ -519,20 +518,20 @@ int fastsec_retrievepubkey (const char *privkey_fname, const char *pubkey_fname,
         memset (&st1, '\0', sizeof (st1));
         memset (&st2, '\0', sizeof (st2));
         if (fstat (fd_privkey, &st1)) {
-            err_sprintf (errmsg, "%s: %s", privkey_fname, strerror (errno));
+            err_sprintf (errmsg, "%s: %s", fs->privkey_fname, strerror (errno));
             return 1;
         }
-        if (!stat (pubkey_fname, &st2)) {
+        if (!stat (fs->pubkey_fname, &st2)) {
             if (st1.st_uid != st2.st_uid) {
-                err_sprintf (errmsg, "%s and %s have different ownership", privkey_fname, pubkey_fname);
+                err_sprintf (errmsg, "%s and %s have different ownership", fs->privkey_fname, fs->pubkey_fname);
                 return 1;
             }
         }
-        if ((fd_pubkey = open (pubkey_fname, O_RDWR | O_CREAT, 0644)) == -1) {
-            err_sprintf (errmsg, "%s: %s", pubkey_fname, strerror (errno));
+        if ((fd_pubkey = open (fs->pubkey_fname, O_RDWR | O_CREAT, 0644)) == -1) {
+            err_sprintf (errmsg, "%s: %s", fs->pubkey_fname, strerror (errno));
             return 1;
         }
-        if (make_public_private_key (fd_privkey, privkey_fname, fd_pubkey, pubkey_fname, randseries, &privkey, &pubkey, errmsg))
+        if (make_public_private_key (fd_privkey, fs->privkey_fname, fd_pubkey, fs->pubkey_fname, fs->randseries, &privkey, &pubkey, errmsg))
             return 1;
         write_hex_str (out, (const unsigned char *) &pubkey, CURVE_KEYLEN_BOTH);
     }
@@ -637,14 +636,62 @@ static void keydgst (const unsigned char *egg_white, const unsigned char *egg_yo
     }
 }
 
-void fastsec_init (void)
+enum fastsec_init_result fastsec_init (struct fastsec *fs)
 {
+    const char *privkey_fname = "/var/tmp/tapfwd-ecurve-private-key.dat";
+    const char *remotepubkey_fname = "/var/tmp/tapfwd-ecurve-remote-public-key.dat";
+    const char *pubkey_fname = "/var/tmp/tapfwd-ecurve-public-key.dat";
+
     fastsec_runcurvetests ();
+
+    memset (fs, '\0', sizeof (*fs));
+    fs->server_mode = -1;
+
+    fs->remotepubkey_fname = remotepubkey_fname;
+    fs->pubkey_fname = pubkey_fname;
+    fs->privkey_fname = privkey_fname;
+
+    if ((fs->fd_privkey = open (fs->privkey_fname, O_RDWR | O_CREAT, 0600)) == -1)
+        return FASTSEC_INIT_RESULT_FAIL_PRIVKEY;
+    if ((fs->fd_remotepubkey = open (fs->remotepubkey_fname, O_RDWR | O_CREAT, 0644)) == -1)
+        return FASTSEC_INIT_RESULT_FAIL_REMOTEPUBKEY;
+    if ((fs->fd_pubkey = open (fs->pubkey_fname, O_RDWR | O_CREAT, 0644)) == -1)
+        return FASTSEC_INIT_RESULT_FAIL_PUBKEY;
 
     if (FASTSEC_KEY_SZ == 32)
         fastsec_has_hw_aes = aes_has_aesni ();
     else
         fastsec_has_hw_aes = 0;
+
+    fs->randseries = randseries_new (FASTSEC_KEY_SZ);
+
+    return FASTSEC_INIT_RESULT_SUCCESS;
+}
+
+void fastsec_reconnect (struct fastsec *fs)
+{
+    fs->client_close_req_recieved = 0;
+    fs->future_packet_sent = 0;
+    fs->last_hb_recv = 0L;
+    fs->last_hb_sent = 0L;
+    fs->pkt_recv_count = 0UL;
+    fs->non_replay_counter_encrypt = fs->non_replay_counter_decrypt = 0x5555555555555555ULL;
+}
+
+void fastsec_set_mode (struct fastsec *fs, enum fastsec_mode m)
+{
+    assert (fs->server_mode == -1 && "fastsec_set_mode can be called only once");
+    assert (m == FASTSEC_MODE_CLIENT || m == FASTSEC_MODE_SERVER);
+    fs->server_mode = (m == FASTSEC_MODE_SERVER);
+    if (fs->server_mode)
+        fs->auth_mode = 1;
+}
+
+void fastsec_set_strict_auth (struct fastsec *fs, enum fastsec_auth auth)
+{
+    assert (fs->server_mode != -1 && "fastsec_set_mode must be called before fastsec_set_strict_auth");
+    assert (auth == FASTSEC_MODE_AUTH_REJECT_UNKNOWN_PEERS || auth == FASTSEC_MODE_AUTH_ALLOW_UNKNOWN_PEERS);
+    fs->auth_mode = (auth == FASTSEC_MODE_AUTH_REJECT_UNKNOWN_PEERS);
 }
 
 int fastsec_set_aeskeys (unsigned char *key1, struct aes_key_st *aes1, unsigned char *key2, struct aes_key_st *aes2)
@@ -660,7 +707,7 @@ int fastsec_set_aeskeys (unsigned char *key1, struct aes_key_st *aes1, unsigned 
     return 0;
 }
 
-enum fastsec_result fastsec_keyexchange (struct fastsec_keyexchange_info *info, struct randseries *randseries, char *errmsg, unsigned char *key1, unsigned char *key2)
+enum fastsec_result fastsec_keyexchange (struct fastsec *fs, char *errmsg, unsigned char *key1, unsigned char *key2)
 {
     struct handshakedata hd;
     char errmsg_[ERRMSG_LEN];
@@ -672,19 +719,19 @@ enum fastsec_result fastsec_keyexchange (struct fastsec_keyexchange_info *info, 
 
 #define err(e,prn)   do { r = e; prn; goto errout; } while (0)
 
-    if (info->server_mode) {
-        if (readall (info->sock, &hd.ch, sizeof (hd.ch), errmsg_) != sizeof (hd.ch))
+    if (fs->server_mode) {
+        if (readall (fs->sock, &hd.ch, sizeof (hd.ch), errmsg_) != sizeof (hd.ch))
             err (FASTSEC_RESULT_SOCKET_ERROR, err_sprintf (errmsg, "handshake: %s", errmsg_));
         hd.ch.clientname[FASTSEC_CLIENTNAME_MAXLEN - 1] = '\0';
         if (fastsec_validateclientname (hd.ch.clientname))
             err (FASTSEC_RESULT_SECURITY_ERROR, strcpy (errmsg, "invalid client name in handshake"));
-        if ((r = store_remote_public_key (info->fd_remotepubkey, info->remotepubkey_fname, hd.ch.clientname, &hd.ch.pubkey, info->auth_mode, info->no_store, errmsg)) != FASTSEC_RESULT_SUCCESS)
+        if ((r = store_remote_public_key (fs->fd_remotepubkey, fs->remotepubkey_fname, hd.ch.clientname, &hd.ch.pubkey, fs->auth_mode, fs->no_store, errmsg)) != FASTSEC_RESULT_SUCCESS)
             return r;
         printf ("received client hello\n");
-        if (make_public_private_key (info->fd_privkey, info->privkey_fname, info->fd_pubkey, info->pubkey_fname, randseries, &hd.privkey, &hd.sh.pubkey, errmsg))
+        if (make_public_private_key (fs->fd_privkey, fs->privkey_fname, fs->fd_pubkey, fs->pubkey_fname, fs->randseries, &hd.privkey, &hd.sh.pubkey, errmsg))
             err (FASTSEC_RESULT_STORAGE_ERROR,);
-        make_transient_public_private_key (randseries, &hd.transient_privkey, &hd.sh.transient_pubkey);
-        if (writeall (info->sock, &hd.sh, sizeof (hd.sh), errmsg_) != sizeof (hd.sh))
+        make_transient_public_private_key (fs->randseries, &hd.transient_privkey, &hd.sh.transient_pubkey);
+        if (writeall (fs->sock, &hd.sh, sizeof (hd.sh), errmsg_) != sizeof (hd.sh))
             err (FASTSEC_RESULT_SOCKET_ERROR, err_sprintf (errmsg, "handshake: %s", errmsg_));
         printf ("sent server hello\n");
         curve25519 (hd.shared_secret.v25519, hd.privkey.v25519, hd.ch.pubkey.v25519);
@@ -704,16 +751,16 @@ enum fastsec_result fastsec_keyexchange (struct fastsec_keyexchange_info *info, 
         xor_mem (key1, hd.transient_key1, FASTSEC_KEY_SZ);
         xor_mem (key2, hd.transient_key2, FASTSEC_KEY_SZ);
     } else {
-        if (make_public_private_key (info->fd_privkey, info->privkey_fname, info->fd_pubkey, info->pubkey_fname, randseries, &hd.privkey, &hd.ch.pubkey, errmsg))
+        if (make_public_private_key (fs->fd_privkey, fs->privkey_fname, fs->fd_pubkey, fs->pubkey_fname, fs->randseries, &hd.privkey, &hd.ch.pubkey, errmsg))
             err (FASTSEC_RESULT_STORAGE_ERROR,);
-        make_transient_public_private_key (randseries, &hd.transient_privkey, &hd.ch.transient_pubkey);
-        strcpy (hd.ch.clientname, info->clientname);
-        if (writeall (info->sock, &hd.ch, sizeof (hd.ch), errmsg_) != sizeof (hd.ch))
+        make_transient_public_private_key (fs->randseries, &hd.transient_privkey, &hd.ch.transient_pubkey);
+        strcpy (hd.ch.clientname, fs->clientname);
+        if (writeall (fs->sock, &hd.ch, sizeof (hd.ch), errmsg_) != sizeof (hd.ch))
             err (FASTSEC_RESULT_SOCKET_ERROR, err_sprintf (errmsg, "handshake: %s", errmsg_));
         printf ("sent client hello, %d bytes\n", (int) sizeof (hd.ch));
-        if (readall (info->sock, &hd.sh, sizeof (hd.sh), errmsg_) != sizeof (hd.sh))
+        if (readall (fs->sock, &hd.sh, sizeof (hd.sh), errmsg_) != sizeof (hd.sh))
             err (FASTSEC_RESULT_SOCKET_ERROR, err_sprintf (errmsg, "handshake: %s", errmsg_));
-        if ((r = store_remote_public_key (info->fd_remotepubkey, info->remotepubkey_fname, info->remotename, &hd.sh.pubkey, info->auth_mode, 0, errmsg)) != FASTSEC_RESULT_SUCCESS)
+        if ((r = store_remote_public_key (fs->fd_remotepubkey, fs->remotepubkey_fname, fs->remotename, &hd.sh.pubkey, fs->auth_mode, 0, errmsg)) != FASTSEC_RESULT_SUCCESS)
             return r;
         printf ("received server hello\n");
         curve25519 (hd.shared_secret.v25519, hd.privkey.v25519, hd.sh.pubkey.v25519);
@@ -741,7 +788,7 @@ enum fastsec_result fastsec_keyexchange (struct fastsec_keyexchange_info *info, 
 }
 
 
-int fastsec_encrypt_packet (char *out, uint64_t *non_replay_counter, struct aes_key_st *aes, struct randseries *s, int pkttype, int len)
+int fastsec_encrypt_packet (struct fastsec *fs, char *out, int pkttype, int len)
 {
     struct header *h;
     struct trailer *t;
@@ -751,22 +798,22 @@ int fastsec_encrypt_packet (char *out, uint64_t *non_replay_counter, struct aes_
 
     write_uint (&h->hdr.pkttype, pkttype, sizeof (h->hdr.pkttype));
     write_uint (&h->hdr.length, FASTSEC_ROUND (len), sizeof (h->hdr.length));
-    write_uint (&h->hdr_chk.non_replay_counter, *non_replay_counter, sizeof (h->hdr_chk.non_replay_counter));
+    write_uint (&h->hdr_chk.non_replay_counter, fs->non_replay_counter_encrypt, sizeof (h->hdr_chk.non_replay_counter));
     write_uint (&h->hdr_chk.pkttype, pkttype, sizeof (h->hdr_chk.pkttype));
     write_uint (&h->hdr_chk.length, len, sizeof (h->hdr_chk.length));
 
-    (*non_replay_counter)++;
+    fs->non_replay_counter_encrypt++;
 
-    randseries_bytes (s, iv, FASTSEC_BLOCK_SZ);
+    randseries_bytes (fs->randseries, iv, FASTSEC_BLOCK_SZ);
     memcpy (h->iv, iv, FASTSEC_BLOCK_SZ);
 
     /* zero trailing bytes */
     memset (((unsigned char *) &h->hdr_chk) + FASTSEC_FULLLEN (len), '\0', FASTSEC_CRYPTLEN (len) - FASTSEC_FULLLEN (len));
 
     if (fastsec_has_hw_aes)
-        aes_ni_cbc_encrypt ((const unsigned char *) &h->hdr_chk, (unsigned char *) &h->hdr_chk, FASTSEC_CRYPTLEN (len), aes, iv);
+        aes_ni_cbc_encrypt ((const unsigned char *) &h->hdr_chk, (unsigned char *) &h->hdr_chk, FASTSEC_CRYPTLEN (len), &fs->aes_encrypt, iv);
     else
-        aes_cbc128_encrypt ((const unsigned char *) &h->hdr_chk, (unsigned char *) &h->hdr_chk, FASTSEC_CRYPTLEN (len), aes, iv);
+        aes_cbc128_encrypt ((const unsigned char *) &h->hdr_chk, (unsigned char *) &h->hdr_chk, FASTSEC_CRYPTLEN (len), &fs->aes_encrypt, iv);
 
     t = (struct trailer *) &out[FASTSEC_HEADER_SIZE + FASTSEC_ROUND (len)];
     memcpy (t->chksum, iv, FASTSEC_BLOCK_SZ);
@@ -868,21 +915,21 @@ enum fastsec_result_avail fastsec_process_ciphertext (struct fastsec *fs, char *
                 return FASTSEC_RESULT_AVAIL_FAIL_PROCESS_PLAINTEXT;
             break;
         case FASTSEC_PKTTYPE_HEARTBEAT:
-            *fs->last_hb_recv = now;
+            fs->last_hb_recv = now;
             break;
         case FASTSEC_PKTTYPE_RESPONSETOCLOSEREQ:
             if (len != sizeof (*fs->save_ticket))
                 return FASTSEC_RESULT_AVAIL_FAIL_CLIENTCLOSERESPONSE_INVALID_PKT_SIZE;
-            *fs->server_ticket_recieved = 1;
+            fs->server_ticket_recieved = 1;
             memcpy (fs->save_ticket, data + FASTSEC_HEADER_SIZE, sizeof (*fs->save_ticket));
             fs->save_ticket->d.utc_seconds = read_uint (&fs->save_ticket->d.utc_seconds, sizeof (fs->save_ticket->d.utc_seconds));
 printf ("TBD\n");
 return FASTSEC_RESULT_AVAIL_SUCCESS;
             break;
         case FASTSEC_PKTTYPE_CLIENTCLOSEREQ:
-            if (fs->server) {
+            if (fs->server_mode) {
                 union reconnect_ticket ticket;
-                *fs->client_close_req_recieved = 1;
+                fs->client_close_req_recieved = 1;
                 fastsec_construct_ticket (&ticket);
                 memcpy (data + FASTSEC_HEADER_SIZE, &ticket, sizeof (ticket));
 printf ("TBD\n");
@@ -903,6 +950,7 @@ printf ("TBD\n");
 }
 
 
+
 enum fastsec_housekeeping_result fastsec_housekeeping (struct fastsec *fs, char *buf, int buflen, int *result_len)
 {
     time_t now;
@@ -917,21 +965,21 @@ enum fastsec_housekeeping_result fastsec_housekeeping (struct fastsec *fs, char 
 
     buf[maxlen - 1] = '~';
 
-    if (!*fs->future_packet_sent) {
-        *fs->future_packet_sent = 1;
+    if (!fs->future_packet_sent) {
+        fs->future_packet_sent = 1;
         memset (&buf[FASTSEC_HEADER_SIZE], '\0', 23);
 /* verify that future packet-types don't terminate the remote end */
-        *result_len += fastsec_encrypt_packet (&buf[*result_len], &fs->non_replay_counter_encrypt, &fs->aes_encrypt, fs->randseries, FASTSEC_PKTTYPE_FUTURE, 23);
+        *result_len += fastsec_encrypt_packet (fs, &buf[*result_len], FASTSEC_PKTTYPE_FUTURE, 23);
     }
 
-    if (!*fs->last_hb_sent || now > *fs->last_hb_sent) {
-        *fs->last_hb_sent = now;
-        *result_len += fastsec_encrypt_packet (&buf[*result_len], &fs->non_replay_counter_encrypt, &fs->aes_encrypt, fs->randseries, FASTSEC_PKTTYPE_HEARTBEAT, 0);
+    if (!fs->last_hb_sent || now > fs->last_hb_sent) {
+        fs->last_hb_sent = now;
+        *result_len += fastsec_encrypt_packet (fs, &buf[*result_len], FASTSEC_PKTTYPE_HEARTBEAT, 0);
     }
 
     assert (buf[maxlen - 1] == '~');
 
-    if (*fs->last_hb_recv && now > *fs->last_hb_recv + 3)
+    if (fs->last_hb_recv && now > fs->last_hb_recv + 3)
         return FASTSEC_HOUSEKEEPING_RESULT_FAIL_HEARTBEAT_TIMEOUT;
 
     return FASTSEC_HOUSEKEEPING_RESULT_SUCCESS;

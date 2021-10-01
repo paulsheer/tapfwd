@@ -12,11 +12,12 @@ enum fastsec_auth {
     FASTSEC_MODE_AUTH_REJECT_UNKNOWN_PEERS = 1,
 };
 
-enum fastsec_result {
-    FASTSEC_RESULT_SUCCESS = 0,
-    FASTSEC_RESULT_STORAGE_ERROR = 10,
-    FASTSEC_RESULT_SOCKET_ERROR = 20,
-    FASTSEC_RESULT_SECURITY_ERROR = 30,
+
+enum fastsec_keyexchange_result {
+    FASTSEC_KEYEXCHANGE_RESULT_SUCCESS = 0,
+    FASTSEC_KEYEXCHANGE_RESULT_STORAGE_ERROR = 10,
+    FASTSEC_KEYEXCHANGE_RESULT_SOCKET_ERROR = 20,
+    FASTSEC_KEYEXCHANGE_RESULT_SECURITY_ERROR = 30,
 };
 
 enum fastsec_result_decrypt {
@@ -73,16 +74,6 @@ union reconnect_ticket {
     unsigned char blocks[FASTSEC_BLOCK_SZ * 2];
 };
 
-enum fastsec_result fastsec_keyexchange (struct fastsec *info, char *errmsg, unsigned char *key1, unsigned char *key2);
-void fastsec_runcurvetests (void);
-int fastsec_retrievepubkey (struct fastsec *fs, char *out, int outlen, char *errmsg);
-int fastsec_validateclientname (const char *clientname);
-void fastsec_aesoneblock (const unsigned char *key, int key_len, const unsigned char *in, unsigned char *out);
-void fastsec_set_mode (struct fastsec *fs, enum fastsec_mode m);
-void fastsec_set_strict_auth (struct fastsec *fs, enum fastsec_auth auth);
-
-
-void fastsec_construct_ticket (union reconnect_ticket *ticket);
 
 struct pkthdr {
     unsigned char pkttype;
@@ -111,6 +102,14 @@ struct trailer {
 #define FASTSEC_CRYPTLEN(c)     ((FASTSEC_FULLLEN(c) + (FASTSEC_BLOCK_SZ - 1)) - ((FASTSEC_FULLLEN(c) + (FASTSEC_BLOCK_SZ - 1))) % FASTSEC_BLOCK_SZ)
 #define FASTSEC_ROUND(c)        (FASTSEC_CRYPTLEN(c) - (int) sizeof(struct pkthdr_chk))
 
+enum fastsec_keyexchange_result fastsec_keyexchange (struct fastsec *info, char *errmsg);
+void fastsec_runcurvetests (void);
+int fastsec_retrievepubkey (struct fastsec *fs, char *out, int outlen, char *errmsg);
+int fastsec_validateclientname (const char *clientname);
+void fastsec_aesoneblock (const unsigned char *key, int key_len, const unsigned char *in, unsigned char *out);
+void fastsec_set_mode (struct fastsec *fs, enum fastsec_mode m);
+void fastsec_set_strict_auth (struct fastsec *fs, enum fastsec_auth auth);
+void fastsec_construct_ticket (union reconnect_ticket *ticket);
 enum fastsec_result_decrypt fastsec_decrypt_packet (char *in, int len_round, int *pkttype, uint64_t *non_replay_counter, struct aes_key_st *aes, int *len);
 int fastsec_encrypt_packet (struct fastsec *fs, char *out, int pkttype, int len);
 int fastsec_set_aeskeys (unsigned char *key1, struct aes_key_st *aes1, unsigned char *key2, struct aes_key_st *aes2);
@@ -129,6 +128,8 @@ struct fastsec {
     uint64_t non_replay_counter_encrypt;
     uint64_t non_replay_counter_decrypt;
     struct randseries *randseries;
+    unsigned char aes_key_encrypt[FASTSEC_KEY_SZ]; /* 1 */
+    unsigned char aes_key_decrypt[FASTSEC_KEY_SZ]; /* 2 */
     struct aes_key_st aes_encrypt;
     struct aes_key_st aes_decrypt;
     time_t last_hb_sent;

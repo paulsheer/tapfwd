@@ -397,7 +397,6 @@ struct cryptobuf {
     int avail;
     int written;
     char data[FASTSEC_BUF_SIZE];
-    unsigned char key[FASTSEC_KEY_SZ];
 };
 
 
@@ -601,7 +600,6 @@ int main (int argc, char **argv)
     int devfd, sock = -1, h = -1;
     struct iprange_list *iprange = NULL;
     struct cryptobuf buf1, buf2;
-    enum fastsec_result fr;
     char errmsg[256];
 
 
@@ -773,48 +771,49 @@ int main (int argc, char **argv)
     }
 
     {
+        enum fastsec_keyexchange_result r;
         long long t1, t2;
         t1 = microtime ();
-        fr = fastsec_keyexchange (fs, errmsg, buf1.key, buf2.key);
+        r = fastsec_keyexchange (fs, errmsg);
         t2 = microtime ();
         printf ("handshake completed in %lld.%01lld ms\n", (t2 - t1) / 1000, ((t2 - t1) % 1000) / 100);
-    }
-
-    if (fr != FASTSEC_RESULT_SUCCESS) {
-        if (fs->server_mode) {
-            static unsigned char once_[65536];
-            unsigned int hash;
-            hash = hash_str (errmsg) % (65536 * 8 - 1);
-            if (!(once_[hash / 8] & (1 << (hash % 8)))) {
-                fprintf (stderr, "error: %s (this error will not repeat)\n", errmsg);
-                once_[hash / 8] |= (1 << (hash % 8));
+    
+        if (r != FASTSEC_KEYEXCHANGE_RESULT_SUCCESS) {
+            if (fs->server_mode) {
+                static unsigned char once_[65536];
+                unsigned int hash;
+                hash = hash_str (errmsg) % (65536 * 8 - 1);
+                if (!(once_[hash / 8] & (1 << (hash % 8)))) {
+                    fprintf (stderr, "error: %s (this error will not repeat)\n", errmsg);
+                    once_[hash / 8] |= (1 << (hash % 8));
+                }
+            } else {
+                fprintf (stderr, "error: %s\n", errmsg);
             }
-        } else {
-            fprintf (stderr, "error: %s\n", errmsg);
+        }
+    
+        switch (r) {
+        case FASTSEC_KEYEXCHANGE_RESULT_SUCCESS:
+            break;
+        case FASTSEC_KEYEXCHANGE_RESULT_STORAGE_ERROR:
+            exit (1);
+            break;
+        case FASTSEC_KEYEXCHANGE_RESULT_SOCKET_ERROR:
+        case FASTSEC_KEYEXCHANGE_RESULT_SECURITY_ERROR:
+            SHUTSOCK (sock);
+            RESTART;
+            break;
         }
     }
 
-    switch (fr) {
-    case FASTSEC_RESULT_SUCCESS:
-        break;
-    case FASTSEC_RESULT_STORAGE_ERROR:
-        exit (1);
-        break;
-    case FASTSEC_RESULT_SOCKET_ERROR:
-    case FASTSEC_RESULT_SECURITY_ERROR:
-        SHUTSOCK (sock);
-        RESTART;
-        break;
-    }
-
-    if (fastsec_set_aeskeys (buf1.key, &fs->aes_encrypt, buf2.key, &fs->aes_decrypt)) {
+    if (fastsec_set_aeskeys (fs->aes_key_encrypt, &fs->aes_encrypt, fs->aes_key_decrypt, &fs->aes_decrypt)) {
         fprintf (stderr, "error: failure setting key\n");
         exit (1);
     }
 
     /* hide secrets: */
-    memset (buf1.key, '\0', sizeof (buf1.key));
-    memset (buf2.key, '\0', sizeof (buf2.key));
+    memset (fs->aes_key_encrypt, '\0', sizeof (fs->aes_key_encrypt));
+    memset (fs->aes_key_decrypt, '\0', sizeof (fs->aes_key_decrypt));
 
     {
         int yes = 1;

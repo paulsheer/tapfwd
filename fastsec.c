@@ -284,14 +284,14 @@ static int WARN_UNUSED fd_gets (int fd, char *out, int len, struct fdcache *cach
     return 0;
 }
 
-static enum fastsec_result store_remote_public_key (int fd, const char *fname, const char *host, struct eckey *pubkey, int no_new_keys, int no_store, char *errmsg)
+static enum fastsec_keyexchange_result store_remote_public_key (int fd, const char *fname, const char *host, struct eckey *pubkey, int no_new_keys, int no_store, char *errmsg)
 {
     int line = 0;
     char t[1024];
     struct fdcache cache;
     memset (&cache, '\0', sizeof (cache));
     if (fd_position (fd, fname, 0, errmsg))
-        return FASTSEC_RESULT_STORAGE_ERROR;
+        return FASTSEC_KEYEXCHANGE_RESULT_STORAGE_ERROR;
     for (;;) {
         unsigned char pubkeycmp[CURVE_KEYLEN_BOTH];
         unsigned char *p;
@@ -311,27 +311,27 @@ static enum fastsec_result store_remote_public_key (int fd, const char *fname, c
             p++;
         if (read_hex_str ((const char *) p, CURVE_KEYLEN_BOTH, pubkeycmp)) {
             err_sprintf (errmsg, "error: %s:%d: invalid format", fname, line);
-            return FASTSEC_RESULT_STORAGE_ERROR;
+            return FASTSEC_KEYEXCHANGE_RESULT_STORAGE_ERROR;
         }
         if (memcmp ((void *) pubkey, pubkeycmp, CURVE_KEYLEN_BOTH)) {
             err_sprintf (errmsg, "error: %s:%d: public key for remote '%s' does not match", fname, line, host);
-            return FASTSEC_RESULT_SECURITY_ERROR;
+            return FASTSEC_KEYEXCHANGE_RESULT_SECURITY_ERROR;
         }
         printf ("%s:%d: public key for remote '%s' successfully matched\n", fname, line, host);
-        return FASTSEC_RESULT_SUCCESS;
+        return FASTSEC_KEYEXCHANGE_RESULT_SUCCESS;
     }
 
     if (no_store) {
-        return FASTSEC_RESULT_SUCCESS;
+        return FASTSEC_KEYEXCHANGE_RESULT_SUCCESS;
     }
 
     if (no_new_keys) {
         err_sprintf (errmsg, "error: %s:%d: public key for remote '%s' does not exist (see -auth and -noauth options)", fname, line, host);
-        return FASTSEC_RESULT_SECURITY_ERROR;
+        return FASTSEC_KEYEXCHANGE_RESULT_SECURITY_ERROR;
     }
 
     if (fd_position (fd, fname, 1, errmsg))
-        return FASTSEC_RESULT_STORAGE_ERROR;
+        return FASTSEC_KEYEXCHANGE_RESULT_STORAGE_ERROR;
     strcpy (t, host);
     strcat (t, "\t");
     write_hex_str (t + strlen (t), (const unsigned char *) pubkey, CURVE_KEYLEN_BOTH);
@@ -339,9 +339,9 @@ static enum fastsec_result store_remote_public_key (int fd, const char *fname, c
     printf ("%s:%d: stored new public key for '%s'\n", fname, line, host);
     if ((int) write (fd, t, strlen (t)) != (int) strlen (t)) {
         err_sprintf (errmsg, "%s: writing to key store: %s", fname, strerror (errno));
-        return FASTSEC_RESULT_STORAGE_ERROR;
+        return FASTSEC_KEYEXCHANGE_RESULT_STORAGE_ERROR;
     }
-    return FASTSEC_RESULT_SUCCESS;
+    return FASTSEC_KEYEXCHANGE_RESULT_SUCCESS;
 }
 
 static int WARN_UNUSED write_public_key (int fd, const char *fname, struct eckey *pubkey, char *errmsg)
@@ -707,32 +707,32 @@ int fastsec_set_aeskeys (unsigned char *key1, struct aes_key_st *aes1, unsigned 
     return 0;
 }
 
-enum fastsec_result fastsec_keyexchange (struct fastsec *fs, char *errmsg, unsigned char *key1, unsigned char *key2)
+enum fastsec_keyexchange_result fastsec_keyexchange (struct fastsec *fs, char *errmsg)
 {
     struct handshakedata hd;
     char errmsg_[ERRMSG_LEN];
-    enum fastsec_result r = FASTSEC_RESULT_SUCCESS;
+    enum fastsec_keyexchange_result r = FASTSEC_KEYEXCHANGE_RESULT_SUCCESS;
 
     memset (&hd, '\0', sizeof (hd));
-    memset (key1, '\0', FASTSEC_KEY_SZ);
-    memset (key2, '\0', FASTSEC_KEY_SZ);
+    memset (fs->aes_key_encrypt, '\0', FASTSEC_KEY_SZ);
+    memset (fs->aes_key_decrypt, '\0', FASTSEC_KEY_SZ);
 
 #define err(e,prn)   do { r = e; prn; goto errout; } while (0)
 
     if (fs->server_mode) {
         if (readall (fs->sock, &hd.ch, sizeof (hd.ch), errmsg_) != sizeof (hd.ch))
-            err (FASTSEC_RESULT_SOCKET_ERROR, err_sprintf (errmsg, "handshake: %s", errmsg_));
+            err (FASTSEC_KEYEXCHANGE_RESULT_SOCKET_ERROR, err_sprintf (errmsg, "handshake: %s", errmsg_));
         hd.ch.clientname[FASTSEC_CLIENTNAME_MAXLEN - 1] = '\0';
         if (fastsec_validateclientname (hd.ch.clientname))
-            err (FASTSEC_RESULT_SECURITY_ERROR, strcpy (errmsg, "invalid client name in handshake"));
-        if ((r = store_remote_public_key (fs->fd_remotepubkey, fs->remotepubkey_fname, hd.ch.clientname, &hd.ch.pubkey, fs->auth_mode, fs->no_store, errmsg)) != FASTSEC_RESULT_SUCCESS)
+            err (FASTSEC_KEYEXCHANGE_RESULT_SECURITY_ERROR, strcpy (errmsg, "invalid client name in handshake"));
+        if ((r = store_remote_public_key (fs->fd_remotepubkey, fs->remotepubkey_fname, hd.ch.clientname, &hd.ch.pubkey, fs->auth_mode, fs->no_store, errmsg)) != FASTSEC_KEYEXCHANGE_RESULT_SUCCESS)
             return r;
         printf ("received client hello\n");
         if (make_public_private_key (fs->fd_privkey, fs->privkey_fname, fs->fd_pubkey, fs->pubkey_fname, fs->randseries, &hd.privkey, &hd.sh.pubkey, errmsg))
-            err (FASTSEC_RESULT_STORAGE_ERROR,);
+            err (FASTSEC_KEYEXCHANGE_RESULT_STORAGE_ERROR,);
         make_transient_public_private_key (fs->randseries, &hd.transient_privkey, &hd.sh.transient_pubkey);
         if (writeall (fs->sock, &hd.sh, sizeof (hd.sh), errmsg_) != sizeof (hd.sh))
-            err (FASTSEC_RESULT_SOCKET_ERROR, err_sprintf (errmsg, "handshake: %s", errmsg_));
+            err (FASTSEC_KEYEXCHANGE_RESULT_SOCKET_ERROR, err_sprintf (errmsg, "handshake: %s", errmsg_));
         printf ("sent server hello\n");
         curve25519 (hd.shared_secret.v25519, hd.privkey.v25519, hd.ch.pubkey.v25519);
         curve448 (hd.shared_secret.v448, hd.privkey.v448, hd.ch.pubkey.v448);
@@ -744,35 +744,35 @@ enum fastsec_result fastsec_keyexchange (struct fastsec *fs, char *errmsg, unsig
 #define LEFT(a,b)       &a[0]
 #define RGHT(a,b)       &a[JUSTIFY(sizeof(a),b)]
 
-        keydgst (LEFT (hd.shared_secret.v448, FASTSEC_KEY_SZ), LEFT (hd.shared_secret.v25519, FASTSEC_BLOCK_SZ), key1);
-        keydgst (RGHT (hd.shared_secret.v448, FASTSEC_KEY_SZ), RGHT (hd.shared_secret.v25519, FASTSEC_BLOCK_SZ), key2);
+        keydgst (LEFT (hd.shared_secret.v448, FASTSEC_KEY_SZ), LEFT (hd.shared_secret.v25519, FASTSEC_BLOCK_SZ), fs->aes_key_encrypt);
+        keydgst (RGHT (hd.shared_secret.v448, FASTSEC_KEY_SZ), RGHT (hd.shared_secret.v25519, FASTSEC_BLOCK_SZ), fs->aes_key_decrypt);
         keydgst (LEFT (hd.trnsnt_secret.v448, FASTSEC_KEY_SZ), LEFT (hd.trnsnt_secret.v25519, FASTSEC_BLOCK_SZ), hd.transient_key1);
         keydgst (RGHT (hd.trnsnt_secret.v448, FASTSEC_KEY_SZ), RGHT (hd.trnsnt_secret.v25519, FASTSEC_BLOCK_SZ), hd.transient_key2);
-        xor_mem (key1, hd.transient_key1, FASTSEC_KEY_SZ);
-        xor_mem (key2, hd.transient_key2, FASTSEC_KEY_SZ);
+        xor_mem (fs->aes_key_encrypt, hd.transient_key1, FASTSEC_KEY_SZ);
+        xor_mem (fs->aes_key_decrypt, hd.transient_key2, FASTSEC_KEY_SZ);
     } else {
         if (make_public_private_key (fs->fd_privkey, fs->privkey_fname, fs->fd_pubkey, fs->pubkey_fname, fs->randseries, &hd.privkey, &hd.ch.pubkey, errmsg))
-            err (FASTSEC_RESULT_STORAGE_ERROR,);
+            err (FASTSEC_KEYEXCHANGE_RESULT_STORAGE_ERROR,);
         make_transient_public_private_key (fs->randseries, &hd.transient_privkey, &hd.ch.transient_pubkey);
         strcpy (hd.ch.clientname, fs->clientname);
         if (writeall (fs->sock, &hd.ch, sizeof (hd.ch), errmsg_) != sizeof (hd.ch))
-            err (FASTSEC_RESULT_SOCKET_ERROR, err_sprintf (errmsg, "handshake: %s", errmsg_));
+            err (FASTSEC_KEYEXCHANGE_RESULT_SOCKET_ERROR, err_sprintf (errmsg, "handshake: %s", errmsg_));
         printf ("sent client hello, %d bytes\n", (int) sizeof (hd.ch));
         if (readall (fs->sock, &hd.sh, sizeof (hd.sh), errmsg_) != sizeof (hd.sh))
-            err (FASTSEC_RESULT_SOCKET_ERROR, err_sprintf (errmsg, "handshake: %s", errmsg_));
-        if ((r = store_remote_public_key (fs->fd_remotepubkey, fs->remotepubkey_fname, fs->remotename, &hd.sh.pubkey, fs->auth_mode, 0, errmsg)) != FASTSEC_RESULT_SUCCESS)
+            err (FASTSEC_KEYEXCHANGE_RESULT_SOCKET_ERROR, err_sprintf (errmsg, "handshake: %s", errmsg_));
+        if ((r = store_remote_public_key (fs->fd_remotepubkey, fs->remotepubkey_fname, fs->remotename, &hd.sh.pubkey, fs->auth_mode, 0, errmsg)) != FASTSEC_KEYEXCHANGE_RESULT_SUCCESS)
             return r;
         printf ("received server hello\n");
         curve25519 (hd.shared_secret.v25519, hd.privkey.v25519, hd.sh.pubkey.v25519);
         curve448 (hd.shared_secret.v448, hd.privkey.v448, hd.sh.pubkey.v448);
         curve25519 (hd.trnsnt_secret.v25519, hd.transient_privkey.v25519, hd.sh.transient_pubkey.v25519);
         curve448 (hd.trnsnt_secret.v448, hd.transient_privkey.v448, hd.sh.transient_pubkey.v448);
-        keydgst (LEFT (hd.shared_secret.v448, FASTSEC_KEY_SZ), LEFT (hd.shared_secret.v25519, FASTSEC_BLOCK_SZ), key2);
-        keydgst (RGHT (hd.shared_secret.v448, FASTSEC_KEY_SZ), RGHT (hd.shared_secret.v25519, FASTSEC_BLOCK_SZ), key1);
+        keydgst (LEFT (hd.shared_secret.v448, FASTSEC_KEY_SZ), LEFT (hd.shared_secret.v25519, FASTSEC_BLOCK_SZ), fs->aes_key_decrypt);
+        keydgst (RGHT (hd.shared_secret.v448, FASTSEC_KEY_SZ), RGHT (hd.shared_secret.v25519, FASTSEC_BLOCK_SZ), fs->aes_key_encrypt);
         keydgst (LEFT (hd.trnsnt_secret.v448, FASTSEC_KEY_SZ), LEFT (hd.trnsnt_secret.v25519, FASTSEC_BLOCK_SZ), hd.transient_key2);
         keydgst (RGHT (hd.trnsnt_secret.v448, FASTSEC_KEY_SZ), RGHT (hd.trnsnt_secret.v25519, FASTSEC_BLOCK_SZ), hd.transient_key1);
-        xor_mem (key2, hd.transient_key2, FASTSEC_KEY_SZ);
-        xor_mem (key1, hd.transient_key1, FASTSEC_KEY_SZ);
+        xor_mem (fs->aes_key_decrypt, hd.transient_key2, FASTSEC_KEY_SZ);
+        xor_mem (fs->aes_key_encrypt, hd.transient_key1, FASTSEC_KEY_SZ);
     }
 
     /* hide secrets: */
@@ -782,8 +782,8 @@ enum fastsec_result fastsec_keyexchange (struct fastsec *fs, char *errmsg, unsig
   errout:
     /* hide secrets: */
     memset (&hd, '\0', sizeof (hd));
-    memset (key1, '\0', FASTSEC_KEY_SZ);
-    memset (key2, '\0', FASTSEC_KEY_SZ);
+    memset (fs->aes_key_encrypt, '\0', FASTSEC_KEY_SZ);
+    memset (fs->aes_key_decrypt, '\0', FASTSEC_KEY_SZ);
     return r;
 }
 

@@ -574,23 +574,6 @@ unsigned long hash_str (const char *s)
     return c;
 }
 
-static int process_plaintext (void *user_data1, void *user_data2, char *data, int len)
-{
-    int *fd_;
-    int fd, r;
-    assert (user_data1);
-    assert (!user_data2);
-    fd_ = (int *) user_data1;
-    fd = (int) *fd_;
-    r = write (fd, data, len);
-    if (r < 0 && errno_TEMP ()) {
-        /* ok */
-    } else if (r <= 0) {
-        return 1;
-    }
-    return 0;
-}
-
 int main (int argc, char **argv)
 {
     struct fastsec fs_, *fs;
@@ -618,21 +601,18 @@ int main (int argc, char **argv)
     fs = &fs_;
 
     switch (fastsec_init (fs)) {
-    case FASTSEC_INIT_RESULT_SUCCESS:
+    case FASTSEC_RESULT_INIT_SUCCESS:
         break;
-    case FASTSEC_INIT_RESULT_FAIL_PRIVKEY:
+    case FASTSEC_RESULT_INIT_FAIL_PRIVKEY:
         fatalerror (fs->privkey_fname);
         break;
-    case FASTSEC_INIT_RESULT_FAIL_REMOTEPUBKEY:
+    case FASTSEC_RESULT_INIT_FAIL_REMOTEPUBKEY:
         fatalerror (fs->pubkey_fname);
         break;
-    case FASTSEC_INIT_RESULT_FAIL_PUBKEY:
+    case FASTSEC_RESULT_INIT_FAIL_PUBKEY:
         fatalerror (fs->pubkey_fname);
         break;
     }
-
-    fs->process_plaintext = process_plaintext;
-    fs->user_data1 = (void *) &devfd;
 
     if (cmdlineopt->co_pubkey) {
         char w[1024];
@@ -697,6 +677,12 @@ int main (int argc, char **argv)
         goto restart; \
     } while (0)
 
+    fastsec_set_mode (fs, cmdlineopt->co_listen ? FASTSEC_MODE_SERVER : FASTSEC_MODE_CLIENT);
+    if (cmdlineopt->co_auth)
+        fastsec_set_strict_auth (fs, FASTSEC_MODE_AUTH_REJECT_UNKNOWN_PEERS);
+    if (cmdlineopt->co_noauth)
+        fastsec_set_strict_auth (fs, FASTSEC_MODE_AUTH_ALLOW_UNKNOWN_PEERS);
+
 #define SHUTRESTART(m) \
     do { \
         if (sock >= 0) \
@@ -749,14 +735,6 @@ int main (int argc, char **argv)
         }
     }
 
-    fastsec_set_mode (fs, cmdlineopt->co_listen ? FASTSEC_MODE_SERVER : FASTSEC_MODE_CLIENT);
-
-    if (cmdlineopt->co_auth)
-        fastsec_set_strict_auth (fs, FASTSEC_MODE_AUTH_REJECT_UNKNOWN_PEERS);
-
-    if (cmdlineopt->co_noauth)
-        fastsec_set_strict_auth (fs, FASTSEC_MODE_AUTH_ALLOW_UNKNOWN_PEERS);
-
     fs->no_store = cmdlineopt->co_nostore;
     if (!fs->server_mode) {
         fs->clientname = cmdlineopt->co_clientname;
@@ -771,14 +749,14 @@ int main (int argc, char **argv)
     }
 
     {
-        enum fastsec_keyexchange_result r;
+        enum fastsec_result_keyexchange r;
         long long t1, t2;
         t1 = microtime ();
         r = fastsec_keyexchange (fs, errmsg);
         t2 = microtime ();
         printf ("handshake completed in %lld.%01lld ms\n", (t2 - t1) / 1000, ((t2 - t1) % 1000) / 100);
     
-        if (r != FASTSEC_KEYEXCHANGE_RESULT_SUCCESS) {
+        if (r != FASTSEC_RESULT_KEYEXCHANGE_SUCCESS) {
             if (fs->server_mode) {
                 static unsigned char once_[65536];
                 unsigned int hash;
@@ -793,13 +771,13 @@ int main (int argc, char **argv)
         }
     
         switch (r) {
-        case FASTSEC_KEYEXCHANGE_RESULT_SUCCESS:
+        case FASTSEC_RESULT_KEYEXCHANGE_SUCCESS:
             break;
-        case FASTSEC_KEYEXCHANGE_RESULT_STORAGE_ERROR:
+        case FASTSEC_RESULT_KEYEXCHANGE_STORAGE_ERROR:
             exit (1);
             break;
-        case FASTSEC_KEYEXCHANGE_RESULT_SOCKET_ERROR:
-        case FASTSEC_KEYEXCHANGE_RESULT_SECURITY_ERROR:
+        case FASTSEC_RESULT_KEYEXCHANGE_SOCKET_ERROR:
+        case FASTSEC_RESULT_KEYEXCHANGE_SECURITY_ERROR:
             SHUTSOCK (sock);
             RESTART;
             break;
@@ -828,6 +806,7 @@ int main (int argc, char **argv)
     printf ("connection established\n");
 
     for (;;) {
+        struct fastsec_action a;
         int nfds = 0, idle = 0;
         fd_set rd, wr;
         FD_ZERO (&rd);
@@ -871,24 +850,37 @@ int main (int argc, char **argv)
                         end += r;                                       \
                 }
 
-        {
-            enum fastsec_housekeeping_result r;
-            int result_len = 0;
-
-            r = fastsec_housekeeping (fs, &buf1.data[buf1.avail], FASTSEC_BUF_SIZE - buf1.avail, &result_len);
-
-            switch (r) {
-            case FASTSEC_HOUSEKEEPING_RESULT_SUCCESS:
-                buf1.avail += result_len;
+        memset (&a, '\0', sizeof (a));
+        for (;;) {
+            switch (fastsec_housekeeping (fs, &a)) {
+            case FASTSEC_RESULT_HOUSEKEEPING_AGAIN:
                 break;
-            case FASTSEC_HOUSEKEEPING_RESULT_FAIL_HEARTBEAT_TIMEOUT:
+            case FASTSEC_RESULT_HOUSEKEEPING_SUCCESS:
+                goto outhousekeeping;
+            case FASTSEC_RESULT_HOUSEKEEPING_ACTION:
+                if (a.action == FASTSEC_ACTION_TYPE_WANT_BUF) {
+                    if (a.result > FASTSEC_BUF_SIZE - buf1.avail) {
+                        a.action = FASTSEC_ACTION_TYPE_CANCEL;
+                        break;
+                    }
+                    a.action = FASTSEC_ACTION_TYPE_OK;
+                    a.data = &buf1.data[buf1.avail];
+                    a.datalen = FASTSEC_BUF_SIZE - buf1.avail;
+                } else if (a.action == FASTSEC_ACTION_TYPE_CIPHERTEXT_AVAIL) {
+                    buf1.avail += a.result;
+                } else {
+                    assert(!"bad action");
+                }
+                break;
+            case FASTSEC_RESULT_HOUSEKEEPING_FAIL_HEARTBEAT_TIMEOUT:
                 SHUTRESTART ("timeout - restarting\n");
                 break;
-            case FASTSEC_HOUSEKEEPING_RESULT_FAIL_BUF_TOO_SMALL:
-                /* this is rare. it is not problem. */
+            case FASTSEC_RESULT_HOUSEKEEPING_FAIL_BUF_TOO_SMALL:
+                assert(!"not possible");
                 break;
             }
         }
+      outhousekeeping:
 
         if (FD_ISSET (devfd, &rd)) {
             int r;
@@ -904,26 +896,41 @@ int main (int argc, char **argv)
 
         PROCESS (sock, read, rd, buf2.data, buf2.avail, FASTSEC_BUF_SIZE - buf2.avail);
 
-        {
+        memset (&a, '\0', sizeof (a));
+
+        for (;;) {
+            int r;
             enum fastsec_result_decrypt err_decrypt;
-            enum fastsec_result_avail err_avail = FASTSEC_RESULT_AVAIL_SUCCESS;
-            int read_count;
-
-            err_avail = fastsec_process_ciphertext (fs, buf2.data + buf2.written, buf2.avail - buf2.written, &err_decrypt, &read_count);
-
-            switch (err_avail) {
-            case FASTSEC_RESULT_AVAIL_SUCCESS:
-                buf2.written += read_count;
+            switch (fastsec_process_ciphertext (fs, &a, &err_decrypt)) {
+            case FASTSEC_RESULT_PROCESS_CIPHERTEXT_AGAIN:
                 break;
-            case FASTSEC_RESULT_AVAIL_SUCCESS_NEED_MORE_INPUT:
-                buf2.written += read_count;
-                memmove (buf2.data, buf2.data + buf2.written, buf2.avail - buf2.written);
+            case FASTSEC_RESULT_PROCESS_CIPHERTEXT_ACTION:
+                if (a.action == FASTSEC_ACTION_TYPE_PLAINTEXT_AVAIL) {
+                    r = write (devfd, a.data, a.datalen);
+                    if (r < 0 && errno_TEMP ()) {
+                        /* ok */
+                    } else if (r <= 0) {
+                        SHUTRESTART ("writedev error - restarting\n");
+                    }
+                } else if (a.action == FASTSEC_ACTION_TYPE_WANT_CIPHERTEXT) {
+                    a.action = FASTSEC_ACTION_TYPE_OK;
+                    a.data = buf2.data + buf2.written;
+                    a.datalen = buf2.avail - buf2.written;
+                } else {
+                    assert(!"bad action");
+                }
+                break;
+            case FASTSEC_RESULT_PROCESS_CIPHERTEXT_SUCCESS:
+                assert (a.action == FASTSEC_ACTION_TYPE_RESULT);
+                buf2.written += a.result;
+                if (buf2.avail > buf2.written)
+                    memmove (buf2.data, buf2.data + buf2.written, buf2.avail - buf2.written);
                 buf2.avail -= buf2.written;
                 buf2.written = 0;
-                break;
-            case FASTSEC_RESULT_AVAIL_FAIL_LENGTH_TOO_LARGE:
+                goto outciphertext;
+            case FASTSEC_RESULT_PROCESS_CIPHERTEXT_FAIL_LENGTH_TOO_LARGE:
                 SHUTRESTART ("bad length\n");
-            case FASTSEC_RESULT_AVAIL_FAIL_DECRYPT:
+            case FASTSEC_RESULT_PROCESS_CIPHERTEXT_FAIL_DECRYPT:
                 switch (err_decrypt) {
                 case FASTSEC_RESULT_DECRYPT_SUCCESS:
                     assert (!"not possible");
@@ -938,14 +945,14 @@ int main (int argc, char **argv)
                     SHUTRESTART ("replay attack detected\n");
                 }
                 break;
-            case FASTSEC_RESULT_AVAIL_FAIL_PROCESS_PLAINTEXT:
-                SHUTRESTART ("writedev error - restarting\n");
-            case FASTSEC_RESULT_AVAIL_FAIL_CLIENTCLOSERESPONSE_INVALID_PKT_SIZE:
+            case FASTSEC_RESULT_PROCESS_CIPHERTEXT_FAIL_CLIENTCLOSERESPONSE_INVALID_PKT_SIZE:
                 SHUTRESTART ("client received CLIENTCLOSERESPONSE invalid packet size\n");
-            case FASTSEC_RESULT_AVAIL_FAIL_CLIENT_RCVD_CLIENTCLOSEREQ:
+            case FASTSEC_RESULT_PROCESS_CIPHERTEXT_FAIL_CLIENT_RCVD_CLIENTCLOSEREQ:
                 SHUTRESTART ("client received invalid packet CLIENTCLOSEREQ\n");
             }
         }
+      outciphertext:
+        /* pass */;
 
         PROCESS (sock, write, wr, buf1.data, buf1.written, buf1.avail - buf1.written);
 

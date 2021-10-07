@@ -32,6 +32,17 @@
 
 
 
+
+
+#ifdef __GNUC__
+#define WARN_UNUSED             __attribute__((warn_unused_result))
+#else
+#define WARN_UNUSED             
+#endif
+
+
+
+
 struct cmdlineoption {
     int co_pubkey;
     const char *co_remote;
@@ -280,7 +291,7 @@ static int listen_socket (const char *msg, const char *address, int port)
 
 static int connect_socket (const char *msg, const char *address, int port)
 {
-    char m[256];
+    char m[FASTSEC_ERRMSG_LEN];
     time_t t1, t2;
     union sockaddrin4in6 a;
     int r;
@@ -574,6 +585,25 @@ unsigned long hash_str (const char *s)
     return c;
 }
 
+static void handshake_complete (struct fastsec *fs, const char *errmsg, int success, long long t1, long long t2)
+{
+    printf ("handshake completed in %lld.%01lld ms\n", (t2 - t1) / 1000, ((t2 - t1) % 1000) / 100);
+
+    if (!success) {
+        if (fs->server_mode) {
+            static unsigned char once_[65536];
+            unsigned int hash;
+            hash = hash_str (errmsg) % (65536 * 8 - 1);
+            if (!(once_[hash / 8] & (1 << (hash % 8)))) {
+                fprintf (stderr, "error: %s (this error will not repeat)\n", errmsg);
+                once_[hash / 8] |= (1 << (hash % 8));
+            }
+        } else {
+            fprintf (stderr, "error: %s\n", errmsg);
+        }
+    }
+}
+
 int main (int argc, char **argv)
 {
     struct fastsec fs_, *fs;
@@ -583,7 +613,9 @@ int main (int argc, char **argv)
     int devfd, sock = -1, h = -1;
     struct iprange_list *iprange = NULL;
     struct cryptobuf buf1, buf2;
-    char errmsg[256];
+    char errmsg[FASTSEC_ERRMSG_LEN];
+    struct fastsec_action a;
+    long long connect_time_start;
 
 
     cmdlineopt = &cmdlineopt_;
@@ -741,57 +773,13 @@ int main (int argc, char **argv)
         fs->remotename = cmdlineopt->co_remote;
     }
     fs->reconnect_ticket = NULL;
-    fs->sock = sock;
 
     if (fs->server_ticket_recieved && time (NULL) < (time_t) save_ticket.d.utc_seconds) {
         fs->server_ticket_recieved = 0;
         fs->reconnect_ticket = &save_ticket;
     }
 
-    {
-        enum fastsec_result_keyexchange r;
-        long long t1, t2;
-        t1 = microtime ();
-        r = fastsec_keyexchange (fs, errmsg);
-        t2 = microtime ();
-        printf ("handshake completed in %lld.%01lld ms\n", (t2 - t1) / 1000, ((t2 - t1) % 1000) / 100);
-    
-        if (r != FASTSEC_RESULT_KEYEXCHANGE_SUCCESS) {
-            if (fs->server_mode) {
-                static unsigned char once_[65536];
-                unsigned int hash;
-                hash = hash_str (errmsg) % (65536 * 8 - 1);
-                if (!(once_[hash / 8] & (1 << (hash % 8)))) {
-                    fprintf (stderr, "error: %s (this error will not repeat)\n", errmsg);
-                    once_[hash / 8] |= (1 << (hash % 8));
-                }
-            } else {
-                fprintf (stderr, "error: %s\n", errmsg);
-            }
-        }
-    
-        switch (r) {
-        case FASTSEC_RESULT_KEYEXCHANGE_SUCCESS:
-            break;
-        case FASTSEC_RESULT_KEYEXCHANGE_STORAGE_ERROR:
-            exit (1);
-            break;
-        case FASTSEC_RESULT_KEYEXCHANGE_SOCKET_ERROR:
-        case FASTSEC_RESULT_KEYEXCHANGE_SECURITY_ERROR:
-            SHUTSOCK (sock);
-            RESTART;
-            break;
-        }
-    }
-
-    if (fastsec_set_aeskeys (fs->aes_key_encrypt, &fs->aes_encrypt, fs->aes_key_decrypt, &fs->aes_decrypt)) {
-        fprintf (stderr, "error: failure setting key\n");
-        exit (1);
-    }
-
-    /* hide secrets: */
-    memset (fs->aes_key_encrypt, '\0', sizeof (fs->aes_key_encrypt));
-    memset (fs->aes_key_decrypt, '\0', sizeof (fs->aes_key_decrypt));
+    connect_time_start = microtime ();
 
     {
         int yes = 1;
@@ -803,11 +791,11 @@ int main (int argc, char **argv)
             fatalerror ("fcntl O_NONBLOCK");
     }
 
-    printf ("connection established\n");
+    printf ("TCP connection established\n");
 
     for (;;) {
-        struct fastsec_action a;
         int nfds = 0, idle = 0;
+        int done;
         fd_set rd, wr;
         FD_ZERO (&rd);
         FD_ZERO (&wr);
@@ -818,7 +806,7 @@ int main (int argc, char **argv)
                 nfds = max(nfds, fd);                           \
             }
 
-        if (!fs->client_close_req_recieved) {
+        if (!fs->client_close_req_recieved && fastsec_connected (fs)) {
             SETUP (devfd, rd, FASTSEC_BUF_SIZE - buf1.avail, 1500 + FASTSEC_HEADER_SIZE + FASTSEC_TRAILER_SIZE + 256);      /* 256 = fudge */
         }
         SETUP (sock, rd, FASTSEC_BUF_SIZE - buf2.avail, 1);
@@ -851,14 +839,17 @@ int main (int argc, char **argv)
                 }
 
         memset (&a, '\0', sizeof (a));
-        for (;;) {
+        done = 0;
+
+        while (fastsec_connected (fs) && !done) {
             switch (fastsec_housekeeping (fs, &a)) {
             case FASTSEC_RESULT_HOUSEKEEPING_AGAIN:
                 break;
             case FASTSEC_RESULT_HOUSEKEEPING_SUCCESS:
-                goto outhousekeeping;
+                done = 1;
+                break;
             case FASTSEC_RESULT_HOUSEKEEPING_ACTION:
-                if (a.action == FASTSEC_ACTION_TYPE_WANT_BUF) {
+                if (a.action == FASTSEC_ACTION_TYPE_WANT_CIPHERTEXT_BUF) {
                     if (a.result > FASTSEC_BUF_SIZE - buf1.avail) {
                         a.action = FASTSEC_ACTION_TYPE_CANCEL;
                         break;
@@ -880,7 +871,6 @@ int main (int argc, char **argv)
                 break;
             }
         }
-      outhousekeeping:
 
         if (FD_ISSET (devfd, &rd)) {
             int r;
@@ -897,8 +887,72 @@ int main (int argc, char **argv)
         PROCESS (sock, read, rd, buf2.data, buf2.avail, FASTSEC_BUF_SIZE - buf2.avail);
 
         memset (&a, '\0', sizeof (a));
+        done = 0;
 
-        for (;;) {
+        while (!fastsec_connected (fs) && !done) {
+
+            switch (fastsec_keyexchange (fs, &a, errmsg)) {
+            case FASTSEC_RESULT_KEYEXCHANGE_SUCCESS:
+                handshake_complete (fs, NULL, 1, connect_time_start, microtime ());
+                done = 1;
+                break;
+
+            case FASTSEC_RESULT_KEYEXCHANGE_ACTION_TIMEOUT:
+                fprintf(stderr, "timeout during keyexchange\n");
+                SHUTSOCK (sock);
+                RESTART;
+                break;
+
+            case FASTSEC_RESULT_KEYEXCHANGE_ACTION:
+                if (a.action == FASTSEC_ACTION_TYPE_WANT_CIPHERTEXT_BUF) {
+                    if (FASTSEC_BUF_SIZE - buf1.avail < a.result) {
+                        done = 1;
+                        break;
+                    }
+                    a.data = buf1.data + buf1.avail;
+                    a.datalen = FASTSEC_BUF_SIZE - buf1.avail;
+                } else if (a.action == FASTSEC_ACTION_TYPE_CIPHERTEXT_AVAIL) {
+                    buf1.avail += a.result;
+                } else if (a.action == FASTSEC_ACTION_TYPE_WANT_CIPHERTEXT) {
+                    if (a.result > buf2.avail - buf2.written) {
+                        done = 1;
+                        break;
+                    }
+                    a.data = buf2.data + buf2.written;
+                    a.datalen = buf2.avail - buf2.written;
+                } else if (a.action == FASTSEC_ACTION_TYPE_CONSUME_CIPHERTEXT_SUCCESS) {
+                    buf2.written += a.result;
+                    if (buf2.avail > buf2.written)
+                        memmove (buf2.data, buf2.data + buf2.written, buf2.avail - buf2.written);
+                    buf2.avail -= buf2.written;
+                    buf2.written = 0;
+                }
+                break;
+
+            case FASTSEC_RESULT_KEYEXCHANGE_FAIL_NAME_VALIDATION:
+                strcpy (errmsg, "invalid client name in handshake");
+                handshake_complete (fs, errmsg, 0, connect_time_start, microtime ());
+                SHUTSOCK (sock);
+                RESTART;
+                break;
+
+            case FASTSEC_RESULT_KEYEXCHANGE_STORAGE_ERROR:
+                fprintf(stderr, "%s\n", errmsg);
+                exit (1);
+                break;
+
+            case FASTSEC_RESULT_KEYEXCHANGE_SECURITY_ERROR:
+                handshake_complete (fs, errmsg, 0, connect_time_start, microtime ());
+                SHUTSOCK (sock);
+                RESTART;
+                break;
+            }
+        }
+
+        memset (&a, '\0', sizeof (a));
+        done = 0;
+
+        while (fastsec_connected (fs) && !done) {
             int r;
             enum fastsec_result_decrypt err_decrypt;
             switch (fastsec_process_ciphertext (fs, &a, &err_decrypt)) {
@@ -927,7 +981,8 @@ int main (int argc, char **argv)
                     memmove (buf2.data, buf2.data + buf2.written, buf2.avail - buf2.written);
                 buf2.avail -= buf2.written;
                 buf2.written = 0;
-                goto outciphertext;
+                done = 1;
+                break;
             case FASTSEC_RESULT_PROCESS_CIPHERTEXT_FAIL_LENGTH_TOO_LARGE:
                 SHUTRESTART ("bad length\n");
             case FASTSEC_RESULT_PROCESS_CIPHERTEXT_FAIL_DECRYPT:
@@ -951,8 +1006,6 @@ int main (int argc, char **argv)
                 SHUTRESTART ("client received invalid packet CLIENTCLOSEREQ\n");
             }
         }
-      outciphertext:
-        /* pass */;
 
         PROCESS (sock, write, wr, buf1.data, buf1.written, buf1.avail - buf1.written);
 

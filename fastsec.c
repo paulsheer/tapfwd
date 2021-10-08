@@ -35,6 +35,36 @@
 #endif
 
 
+struct fastsec {
+    int server_mode;
+    int connected;
+    union fastsec_frame frame;
+    struct fastsec_stats stats;
+    uint64_t non_replay_counter_encrypt;
+    uint64_t non_replay_counter_decrypt;
+    struct randseries *randseries;
+    struct aes_key_st aes_encrypt;
+    struct aes_key_st aes_decrypt;
+    time_t last_hb_sent;
+    time_t last_hb_recv;
+    union reconnect_ticket *save_ticket;
+    int server_ticket_recieved;
+    int client_close_req_recieved;
+    int future_packet_sent;
+    int fd_remotepubkey;
+    int fd_privkey;
+    int fd_pubkey;
+    int auth_mode;
+    int no_store;
+    const char *remotepubkey_fname;
+    const char *pubkey_fname;
+    const char *privkey_fname;
+    const char *clientname;
+    const char *remotename;
+    union reconnect_ticket *reconnect_ticket;
+};
+
+
 
 
 static int fastsec_has_hw_aes = 0;
@@ -442,7 +472,7 @@ static void test_curve25519 (void)
     assert (!memcmp (outb, outcmp, 32));
 }
 
-void fastsec_runcurvetests (void)
+void _fastsec_runcurvetests (void)
 {
     test_curve448 ();
     test_curve25519 ();
@@ -499,7 +529,7 @@ int fastsec_retrievepubkey (struct fastsec *fs, char *out, int outlen, char *err
     return 0;
 }
 
-void fastsec_aesoneblock (const unsigned char *key, int key_len, const unsigned char *in, unsigned char *out)
+void _fastsec_aesoneblock (const unsigned char *key, int key_len, const unsigned char *in, unsigned char *out)
 {
     struct aes_key_st aes;
     if (aes_set_encrypt_key (key, key_len * 8, &aes)) {
@@ -514,34 +544,42 @@ static void keydgst (const unsigned char *egg_white, const unsigned char *egg_yo
 {
     if (FASTSEC_KEY_SZ == 16) {
 /* for backward compatibility with a previous version: */
-        fastsec_aesoneblock (egg_yolk, 16, egg_white, out);
+        _fastsec_aesoneblock (egg_yolk, 16, egg_white, out);
     } else {
         memcpy (out, egg_white, FASTSEC_KEY_SZ);
-        fastsec_aesoneblock (egg_white, FASTSEC_KEY_SZ, egg_yolk, out);
+        _fastsec_aesoneblock (egg_white, FASTSEC_KEY_SZ, egg_yolk, out);
     }
 }
 
-enum fastsec_result_init fastsec_init (struct fastsec *fs)
+enum fastsec_result_init fastsec_init (struct fastsec *fs, char *errmsg)
 {
     const char *privkey_fname = "/var/tmp/tapfwd-ecurve-private-key.dat";
     const char *remotepubkey_fname = "/var/tmp/tapfwd-ecurve-remote-public-key.dat";
     const char *pubkey_fname = "/var/tmp/tapfwd-ecurve-public-key.dat";
 
-    fastsec_runcurvetests ();
-
-    memset (fs, '\0', sizeof (*fs));
-    fs->server_mode = -1;
+    _fastsec_runcurvetests ();
 
     fs->remotepubkey_fname = remotepubkey_fname;
     fs->pubkey_fname = pubkey_fname;
     fs->privkey_fname = privkey_fname;
 
-    if ((fs->fd_privkey = open (fs->privkey_fname, O_RDWR | O_CREAT, 0600)) == -1)
+    assert (fs->server_mode == -1);
+    assert (fs->fd_privkey == -1);
+    assert (fs->fd_remotepubkey == -1);
+    assert (fs->fd_pubkey == -1);
+
+    if ((fs->fd_privkey = open (fs->privkey_fname, O_RDWR | O_CREAT, 0600)) == -1) {
+        err_sprintf (errmsg, "error opening %s", fs->privkey_fname);
         return FASTSEC_RESULT_INIT_FAIL_PRIVKEY;
-    if ((fs->fd_remotepubkey = open (fs->remotepubkey_fname, O_RDWR | O_CREAT, 0644)) == -1)
+    }
+    if ((fs->fd_remotepubkey = open (fs->remotepubkey_fname, O_RDWR | O_CREAT, 0644)) == -1) {
+        err_sprintf (errmsg, "error opening %s", fs->remotepubkey_fname);
         return FASTSEC_RESULT_INIT_FAIL_REMOTEPUBKEY;
-    if ((fs->fd_pubkey = open (fs->pubkey_fname, O_RDWR | O_CREAT, 0644)) == -1)
+    }
+    if ((fs->fd_pubkey = open (fs->pubkey_fname, O_RDWR | O_CREAT, 0644)) == -1) {
+        err_sprintf (errmsg, "error opening %s", fs->pubkey_fname);
         return FASTSEC_RESULT_INIT_FAIL_PUBKEY;
+    }
 
     if (FASTSEC_KEY_SZ == 32)
         fastsec_has_hw_aes = aes_has_aesni ();
@@ -553,6 +591,30 @@ enum fastsec_result_init fastsec_init (struct fastsec *fs)
     return FASTSEC_RESULT_INIT_SUCCESS;
 }
 
+struct fastsec *fastsec_new (void)
+{
+    struct fastsec *fs;
+    fs = malloc (sizeof (*fs));
+    memset (fs, '\0', sizeof (*fs));
+    fs->server_mode = -1;
+    fs->fd_privkey = -1;
+    fs->fd_remotepubkey = -1;
+    fs->fd_pubkey = -1;
+    return fs;
+}
+
+void fastsec_free (struct fastsec *fs)
+{
+    if (fs->fd_privkey >= 0)
+        close (fs->fd_privkey);
+    if (fs->fd_remotepubkey >= 0)
+        close (fs->fd_remotepubkey);
+    if (fs->fd_pubkey >= 0)
+        close (fs->fd_pubkey);
+    memset (fs, '\0', sizeof (*fs));
+    free (fs);
+}
+
 void fastsec_reconnect (struct fastsec *fs)
 {
     fs->frame.state = FASTSEC_STATE_IDLE;
@@ -561,7 +623,7 @@ void fastsec_reconnect (struct fastsec *fs)
     fs->future_packet_sent = 0;
     fs->last_hb_recv = 0L;
     fs->last_hb_sent = 0L;
-    fs->pkt_recv_count = 0UL;
+    memset (&fs->stats, '\0', sizeof (fs->stats));
     fs->non_replay_counter_encrypt = fs->non_replay_counter_decrypt = 0x5555555555555555ULL;
 }
 
@@ -574,11 +636,29 @@ void fastsec_set_mode (struct fastsec *fs, enum fastsec_mode m)
         fs->auth_mode = 1;
 }
 
+void fastsec_set_auth_names (struct fastsec *fs, const char *clientname, const char *remotename)
+{
+    assert (fs->server_mode == FASTSEC_MODE_CLIENT && "fastsec_set_auth_names called as server");
+    fs->clientname = clientname;
+    fs->remotename = remotename;
+}
+
+void fastsec_set_no_store (struct fastsec *fs, int nostore)
+{
+    assert (fs->server_mode != -1 && "fastsec_set_mode has not been called");
+    fs->no_store = nostore;
+}
+
 void fastsec_set_strict_auth (struct fastsec *fs, enum fastsec_auth auth)
 {
     assert (fs->server_mode != -1 && "fastsec_set_mode must be called before fastsec_set_strict_auth");
     assert (auth == FASTSEC_MODE_AUTH_REJECT_UNKNOWN_PEERS || auth == FASTSEC_MODE_AUTH_ALLOW_UNKNOWN_PEERS);
     fs->auth_mode = (auth == FASTSEC_MODE_AUTH_REJECT_UNKNOWN_PEERS);
+}
+
+int fastsec_got_close_request (struct fastsec *fs)
+{
+    return fs->client_close_req_recieved;
 }
 
 static int fastsec_set_aeskeys (unsigned char *key1, struct aes_key_st *aes1, unsigned char *key2, struct aes_key_st *aes2)
@@ -852,11 +932,13 @@ int fastsec_encrypt_packet (struct fastsec *fs, char *out, int pkttype, int len)
     t = (struct trailer *) &out[FASTSEC_HEADER_SIZE + FASTSEC_ROUND (len)];
     memcpy (t->chksum, iv, FASTSEC_BLOCK_SZ);
 
+    fs->stats.pkt_send_count++;
+
     return FASTSEC_HEADER_SIZE + FASTSEC_ROUND (len) + FASTSEC_TRAILER_SIZE;
 }
 
 
-enum fastsec_result_decrypt fastsec_decrypt_packet (char *in, int len_round, int *pkttype, uint64_t *non_replay_counter, struct aes_key_st *aes, int *len)
+enum fastsec_result_decrypt _fastsec_decrypt_packet (char *in, int len_round, int *pkttype, uint64_t *non_replay_counter, struct aes_key_st *aes, int *len)
 {
     struct header *h;
     struct trailer *t;
@@ -903,6 +985,11 @@ void fastsec_construct_ticket (union reconnect_ticket *ticket)
     write_uint (&ticket->d.utc_seconds, expire_time, sizeof (ticket->d.utc_seconds));
 }
 
+
+void fastsec_stats (struct fastsec *fs, struct fastsec_stats *s)
+{
+    *s = fs->stats;
+}
 
 
 int fastsec_connected (struct fastsec *fs)
@@ -964,7 +1051,7 @@ enum fastsec_result_process_ciphertext fastsec_process_ciphertext (struct fastse
 
         {
             enum fastsec_result_decrypt err;
-            switch ((err = fastsec_decrypt_packet (FRAME_data, FRAME_lenround, &FRAME_pkttype, &fs->non_replay_counter_decrypt, &fs->aes_decrypt, &FRAME_len))) {
+            switch ((err = _fastsec_decrypt_packet (FRAME_data, FRAME_lenround, &FRAME_pkttype, &fs->non_replay_counter_decrypt, &fs->aes_decrypt, &FRAME_len))) {
             case FASTSEC_RESULT_DECRYPT_SUCCESS:
                 break;
             default:
@@ -974,7 +1061,7 @@ enum fastsec_result_process_ciphertext fastsec_process_ciphertext (struct fastse
             }
         }
 
-        fs->pkt_recv_count++;
+        fs->stats.pkt_recv_count++;
 
         switch (FRAME_pkttype) {
         case FASTSEC_PKTTYPE_DATA:
@@ -1143,6 +1230,8 @@ enum fastsec_result_housekeeping fastsec_housekeeping (struct fastsec *fs, struc
 #undef FRAME_now
 
 }
+
+
 
 
 

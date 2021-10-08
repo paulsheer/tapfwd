@@ -585,12 +585,12 @@ unsigned long hash_str (const char *s)
     return c;
 }
 
-static void handshake_complete (struct fastsec *fs, const char *errmsg, int success, long long t1, long long t2)
+static void handshake_complete (enum fastsec_mode mode, const char *errmsg, int success, long long t1, long long t2)
 {
     printf ("handshake completed in %lld.%01lld ms\n", (t2 - t1) / 1000, ((t2 - t1) % 1000) / 100);
 
     if (!success) {
-        if (fs->server_mode) {
+        if (mode == FASTSEC_MODE_SERVER) {
             static unsigned char once_[65536];
             unsigned int hash;
             hash = hash_str (errmsg) % (65536 * 8 - 1);
@@ -606,7 +606,7 @@ static void handshake_complete (struct fastsec *fs, const char *errmsg, int succ
 
 int main (int argc, char **argv)
 {
-    struct fastsec fs_, *fs;
+    struct fastsec *fs;
     struct cmdlineoption cmdlineopt_;
     struct cmdlineoption *cmdlineopt;
     union reconnect_ticket save_ticket;
@@ -616,6 +616,7 @@ int main (int argc, char **argv)
     char errmsg[FASTSEC_ERRMSG_LEN];
     struct fastsec_action a;
     long long connect_time_start;
+    enum fastsec_mode mode;
 
 
     cmdlineopt = &cmdlineopt_;
@@ -630,19 +631,15 @@ int main (int argc, char **argv)
         }
     }
 
-    fs = &fs_;
+    fs = fastsec_new ();
 
-    switch (fastsec_init (fs)) {
+    switch (fastsec_init (fs, errmsg)) {
     case FASTSEC_RESULT_INIT_SUCCESS:
         break;
     case FASTSEC_RESULT_INIT_FAIL_PRIVKEY:
-        fatalerror (fs->privkey_fname);
-        break;
     case FASTSEC_RESULT_INIT_FAIL_REMOTEPUBKEY:
-        fatalerror (fs->pubkey_fname);
-        break;
     case FASTSEC_RESULT_INIT_FAIL_PUBKEY:
-        fatalerror (fs->pubkey_fname);
+        fatalerror (errmsg);
         break;
     }
 
@@ -704,12 +701,16 @@ int main (int argc, char **argv)
 
 #define RESTART \
     do { \
-        if (fs->pkt_recv_count < 1UL) \
+        struct fastsec_stats fsstats; \
+        fastsec_stats (fs, &fsstats); \
+        if (fsstats.pkt_recv_count < 1UL) \
              sleep (2); \
         goto restart; \
     } while (0)
 
-    fastsec_set_mode (fs, cmdlineopt->co_listen ? FASTSEC_MODE_SERVER : FASTSEC_MODE_CLIENT);
+    mode = cmdlineopt->co_listen ? FASTSEC_MODE_SERVER : FASTSEC_MODE_CLIENT;
+
+    fastsec_set_mode (fs, mode);
     if (cmdlineopt->co_auth)
         fastsec_set_strict_auth (fs, FASTSEC_MODE_AUTH_REJECT_UNKNOWN_PEERS);
     if (cmdlineopt->co_noauth)
@@ -767,17 +768,19 @@ int main (int argc, char **argv)
         }
     }
 
-    fs->no_store = cmdlineopt->co_nostore;
-    if (!fs->server_mode) {
-        fs->clientname = cmdlineopt->co_clientname;
-        fs->remotename = cmdlineopt->co_remote;
-    }
+    fastsec_set_no_store (fs, cmdlineopt->co_nostore);
+
+    if (mode == FASTSEC_MODE_CLIENT)
+        fastsec_set_auth_names (fs, cmdlineopt->co_clientname, cmdlineopt->co_remote);
+
+#if 0
     fs->reconnect_ticket = NULL;
 
     if (fs->server_ticket_recieved && time (NULL) < (time_t) save_ticket.d.utc_seconds) {
         fs->server_ticket_recieved = 0;
         fs->reconnect_ticket = &save_ticket;
     }
+#endif
 
     connect_time_start = microtime ();
 
@@ -806,7 +809,7 @@ int main (int argc, char **argv)
                 nfds = max(nfds, fd);                           \
             }
 
-        if (!fs->client_close_req_recieved && fastsec_connected (fs)) {
+        if (!fastsec_got_close_request (fs) && fastsec_connected (fs)) {
             SETUP (devfd, rd, FASTSEC_BUF_SIZE - buf1.avail, 1500 + FASTSEC_HEADER_SIZE + FASTSEC_TRAILER_SIZE + 256);      /* 256 = fudge */
         }
         SETUP (sock, rd, FASTSEC_BUF_SIZE - buf2.avail, 1);
@@ -893,7 +896,7 @@ int main (int argc, char **argv)
 
             switch (fastsec_keyexchange (fs, &a, errmsg)) {
             case FASTSEC_RESULT_KEYEXCHANGE_SUCCESS:
-                handshake_complete (fs, NULL, 1, connect_time_start, microtime ());
+                handshake_complete (mode, NULL, 1, connect_time_start, microtime ());
                 done = 1;
                 break;
 
@@ -931,7 +934,7 @@ int main (int argc, char **argv)
 
             case FASTSEC_RESULT_KEYEXCHANGE_FAIL_NAME_VALIDATION:
                 strcpy (errmsg, "invalid client name in handshake");
-                handshake_complete (fs, errmsg, 0, connect_time_start, microtime ());
+                handshake_complete (mode, errmsg, 0, connect_time_start, microtime ());
                 SHUTSOCK (sock);
                 RESTART;
                 break;
@@ -942,7 +945,7 @@ int main (int argc, char **argv)
                 break;
 
             case FASTSEC_RESULT_KEYEXCHANGE_SECURITY_ERROR:
-                handshake_complete (fs, errmsg, 0, connect_time_start, microtime ());
+                handshake_complete (mode, errmsg, 0, connect_time_start, microtime ());
                 SHUTSOCK (sock);
                 RESTART;
                 break;
@@ -1012,7 +1015,7 @@ int main (int argc, char **argv)
         /* check if write data has caught read data */
         if (buf1.written == buf1.avail) {
             buf1.written = buf1.avail = 0;
-            if (fs->client_close_req_recieved) {
+            if (fastsec_got_close_request (fs)) {
                 assert (cmdlineopt->co_listen);
                 SHUTRESTART ("server write CLIENTCLOSERESPONSE\n");
             }

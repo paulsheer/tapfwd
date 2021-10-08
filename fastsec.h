@@ -156,19 +156,6 @@ struct handshakedata {
     unsigned char transient_key2[FASTSEC_KEY_SZ];
 };
 
-enum fastsec_result_keyexchange fastsec_keyexchange (struct fastsec *fs, struct fastsec_action *a, char *errmsg);
-void fastsec_runcurvetests (void);
-int fastsec_retrievepubkey (struct fastsec *fs, char *out, int outlen, char *errmsg);
-int fastsec_validateclientname (const char *clientname);
-void fastsec_aesoneblock (const unsigned char *key, int key_len, const unsigned char *in, unsigned char *out);
-void fastsec_set_mode (struct fastsec *fs, enum fastsec_mode m);
-void fastsec_set_strict_auth (struct fastsec *fs, enum fastsec_auth auth);
-void fastsec_construct_ticket (union reconnect_ticket *ticket);
-enum fastsec_result_decrypt fastsec_decrypt_packet (char *in, int len_round, int *pkttype, uint64_t *non_replay_counter, struct aes_key_st *aes, int *len);
-int fastsec_encrypt_packet (struct fastsec *fs, char *out, int pkttype, int len);
-enum fastsec_result_init fastsec_init (struct fastsec *fs);
-void fastsec_reconnect (struct fastsec *fs);
-
 
 struct fastsec_action {
     enum fastsec_action_type action;
@@ -238,39 +225,34 @@ union fastsec_frame {
     struct fastsec_frame_keyexchange fastsec_keyexchange;
 };
 
-struct fastsec {
-    int server_mode;
-    int connected;
-    union fastsec_frame frame;
+struct fastsec_stats {
     uint64_t pkt_recv_count;
-    uint64_t non_replay_counter_encrypt;
-    uint64_t non_replay_counter_decrypt;
-    struct randseries *randseries;
-    struct aes_key_st aes_encrypt;
-    struct aes_key_st aes_decrypt;
-    time_t last_hb_sent;
-    time_t last_hb_recv;
-    union reconnect_ticket *save_ticket;
-    int server_ticket_recieved;
-    int client_close_req_recieved;
-    int future_packet_sent;
-
-    int fd_remotepubkey;
-    int fd_privkey;
-    int fd_pubkey;
-    int auth_mode;
-    int no_store;
-    const char *remotepubkey_fname;
-    const char *pubkey_fname;
-    const char *privkey_fname;
-    const char *clientname;
-    const char *remotename;
-    union reconnect_ticket *reconnect_ticket;
+    uint64_t pkt_send_count;
 };
+
+struct fastsec;
 
 enum fastsec_result_process_ciphertext fastsec_process_ciphertext (struct fastsec *fs, struct fastsec_action *fsa, enum fastsec_result_decrypt *err_decrypt);
 enum fastsec_result_housekeeping fastsec_housekeeping (struct fastsec *fs, struct fastsec_action *fsa);
 int fastsec_connected (struct fastsec *fs);
+int fastsec_got_close_request (struct fastsec *fs);
+enum fastsec_result_keyexchange fastsec_keyexchange (struct fastsec *fs, struct fastsec_action *a, char *errmsg);
+void _fastsec_runcurvetests (void);
+int fastsec_retrievepubkey (struct fastsec *fs, char *out, int outlen, char *errmsg);
+int fastsec_validateclientname (const char *clientname);
+void _fastsec_aesoneblock (const unsigned char *key, int key_len, const unsigned char *in, unsigned char *out);
+void fastsec_set_mode (struct fastsec *fs, enum fastsec_mode m);
+void fastsec_set_no_store (struct fastsec *fs, int nostore);
+void fastsec_set_auth_names (struct fastsec *fs, const char *clientname, const char *remotename);
+void fastsec_set_strict_auth (struct fastsec *fs, enum fastsec_auth auth);
+void fastsec_construct_ticket (union reconnect_ticket *ticket);
+enum fastsec_result_decrypt _fastsec_decrypt_packet (char *in, int len_round, int *pkttype, uint64_t *non_replay_counter, struct aes_key_st *aes, int *len);
+int fastsec_encrypt_packet (struct fastsec *fs, char *out, int pkttype, int len);
+enum fastsec_result_init fastsec_init (struct fastsec *fs, char *errmsg);
+void fastsec_free (struct fastsec *fs);
+void fastsec_stats (struct fastsec *fs, struct fastsec_stats *);
+struct fastsec *fastsec_new (void);
+void fastsec_reconnect (struct fastsec *fs);
 
 
 

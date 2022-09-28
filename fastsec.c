@@ -1,4 +1,4 @@
-#include <stdlib.h>
+#include <stdlib.h>//
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -24,6 +24,7 @@
 #include "aes.h"
 #include "fastsec.h"
 #include "randseries.h"
+#include "symauth.h"
 
 /* #define TICKET */
 
@@ -43,8 +44,7 @@ struct fastsec {
     uint64_t non_replay_counter_encrypt;
     uint64_t non_replay_counter_decrypt;
     struct randseries *randseries;
-    struct aes_key_st aes_encrypt;
-    struct aes_key_st aes_decrypt;
+    struct symauth *symauth;
     time_t last_hb_sent;
     time_t last_hb_recv;
     union reconnect_ticket *save_ticket;
@@ -65,9 +65,6 @@ struct fastsec {
 };
 
 
-
-
-static int fastsec_has_hw_aes = 0;
 
 
 /* y² = x³ + 486662x² + x */
@@ -581,10 +578,12 @@ enum fastsec_result_init fastsec_init (struct fastsec *fs, char *errmsg)
         return FASTSEC_RESULT_INIT_FAIL_PUBKEY;
     }
 
+#if 0
     if (FASTSEC_KEY_SZ == 32)
         fastsec_has_hw_aes = aes_has_aesni ();
     else
         fastsec_has_hw_aes = 0;
+#endif
 
     fs->randseries = randseries_new (FASTSEC_KEY_SZ);
 
@@ -611,6 +610,8 @@ void fastsec_free (struct fastsec *fs)
         close (fs->fd_remotepubkey);
     if (fs->fd_pubkey >= 0)
         close (fs->fd_pubkey);
+    if (fs->symauth)
+        symauth_free (fs->symauth);
     memset (fs, '\0', sizeof (*fs));
     free (fs);
 }
@@ -659,19 +660,6 @@ void fastsec_set_strict_auth (struct fastsec *fs, enum fastsec_auth auth)
 int fastsec_got_close_request (struct fastsec *fs)
 {
     return fs->client_close_req_recieved;
-}
-
-static int fastsec_set_aeskeys (unsigned char *key1, struct aes_key_st *aes1, unsigned char *key2, struct aes_key_st *aes2)
-{
-    if (fastsec_has_hw_aes) {
-        if (aes_ni_set_encrypt_key (key1, aes1) || aes_ni_set_decrypt_key (key2, aes2))
-            return 1;
-    } else {
-        if (aes_set_encrypt_key (key1, FASTSEC_KEY_SZ * 8, aes1) || aes_set_decrypt_key (key2, FASTSEC_KEY_SZ * 8, aes2))
-            return 1;
-    }
-    printf ("fastsec_set_aeskeys success, fastsec_has_hw_aes=%d, sizeof(long)=%d\n", fastsec_has_hw_aes, (int) sizeof (long));
-    return 0;
 }
 
 enum fastsec_result_keyexchange fastsec_keyexchange (struct fastsec *fs, struct fastsec_action *a, char *errmsg)
@@ -786,7 +774,10 @@ enum fastsec_result_keyexchange fastsec_keyexchange (struct fastsec *fs, struct 
             xor_mem (FRAME_aes_key_encrypt, FRAME_hd.transient_key1, FASTSEC_KEY_SZ);
             xor_mem (FRAME_aes_key_decrypt, FRAME_hd.transient_key2, FASTSEC_KEY_SZ);
 
-            if (fastsec_set_aeskeys (FRAME_aes_key_encrypt, &fs->aes_encrypt, FRAME_aes_key_decrypt, &fs->aes_decrypt)) {
+            if (fs->symauth)
+                symauth_free (fs->symauth);
+            fs->symauth = symauth_new (0, FRAME_aes_key_encrypt, FRAME_aes_key_decrypt);
+            if (!fs->symauth) {
                 assert (!"failure setting key");
             }
 
@@ -878,7 +869,10 @@ enum fastsec_result_keyexchange fastsec_keyexchange (struct fastsec *fs, struct 
             xor_mem (FRAME_aes_key_decrypt, FRAME_hd.transient_key2, FASTSEC_KEY_SZ);
             xor_mem (FRAME_aes_key_encrypt, FRAME_hd.transient_key1, FASTSEC_KEY_SZ);
 
-            if (fastsec_set_aeskeys (FRAME_aes_key_encrypt, &fs->aes_encrypt, FRAME_aes_key_decrypt, &fs->aes_decrypt)) {
+            if (fs->symauth)
+                symauth_free (fs->symauth);
+            fs->symauth = symauth_new (0, FRAME_aes_key_encrypt, FRAME_aes_key_decrypt);
+            if (!fs->symauth) {
                 assert (!"failure setting key");
             }
 
@@ -902,11 +896,12 @@ enum fastsec_result_keyexchange fastsec_keyexchange (struct fastsec *fs, struct 
 }
 
 
-int fastsec_encrypt_packet (struct fastsec *fs, char *out, int pkttype, int len)
+int fastsec_encrypt_packet (struct fastsec *fs, char *const out, int pkttype, const int len)
 {
     struct header *h;
     struct trailer *t;
     unsigned char iv[FASTSEC_BLOCK_SZ];
+    unsigned char auth[FASTSEC_BLOCK_SZ];
 
     h = (struct header *) out;
 
@@ -919,53 +914,45 @@ int fastsec_encrypt_packet (struct fastsec *fs, char *out, int pkttype, int len)
     fs->non_replay_counter_encrypt++;
 
     randseries_bytes (fs->randseries, iv, FASTSEC_BLOCK_SZ);
-    memcpy (h->iv, iv, FASTSEC_BLOCK_SZ);
 
     /* zero trailing bytes */
     memset (((unsigned char *) &h->hdr_chk) + FASTSEC_FULLLEN (len), '\0', FASTSEC_CRYPTLEN (len) - FASTSEC_FULLLEN (len));
-
-    if (fastsec_has_hw_aes)
-        aes_ni_cbc_encrypt ((const unsigned char *) &h->hdr_chk, (unsigned char *) &h->hdr_chk, FASTSEC_CRYPTLEN (len), &fs->aes_encrypt, iv);
-    else
-        aes_cbc128_encrypt ((const unsigned char *) &h->hdr_chk, (unsigned char *) &h->hdr_chk, FASTSEC_CRYPTLEN (len), &fs->aes_encrypt, iv);
+    memcpy (h->iv, iv, FASTSEC_BLOCK_SZ);
+    symauth_encrypt (fs->symauth, (const unsigned char *) &h->hdr_chk, FASTSEC_CRYPTLEN (len), (unsigned char *) &h->hdr_chk, iv, auth);
 
     t = (struct trailer *) &out[FASTSEC_HEADER_SIZE + FASTSEC_ROUND (len)];
-    memcpy (t->chksum, iv, FASTSEC_BLOCK_SZ);
+    memcpy (t->chksum, auth, FASTSEC_BLOCK_SZ);
 
     fs->stats.pkt_send_count++;
 
     return FASTSEC_HEADER_SIZE + FASTSEC_ROUND (len) + FASTSEC_TRAILER_SIZE;
 }
 
-
-enum fastsec_result_decrypt _fastsec_decrypt_packet (char *in, int len_round, int *pkttype, uint64_t *non_replay_counter, struct aes_key_st *aes, int *len)
+enum fastsec_result_decrypt _fastsec_decrypt_packet (char *in, int len_round, int *pkttype, uint64_t *non_replay_counter, struct symauth *symauth, int *len)
 {
     struct header *h;
     struct trailer *t;
     uint64_t non_replay_counter_chk;
     int pkttype_chk;
+    unsigned char iv[FASTSEC_BLOCK_SZ];
 
     h = (struct header *) in;
+    t = (struct trailer *) &in[len_round + FASTSEC_HEADER_SIZE];
 
     *pkttype = read_uint (&h->hdr.pkttype, sizeof (h->hdr.pkttype));
+    memcpy (iv, h->iv, FASTSEC_BLOCK_SZ);
 
-    if (fastsec_has_hw_aes)
-        aes_ni_cbc_decrypt ((const unsigned char *) &h->hdr_chk, (unsigned char *) &h->hdr_chk, len_round + sizeof (struct pkthdr_chk), aes, h->iv);
-    else
-        aes_cbc128_decrypt ((const unsigned char *) &h->hdr_chk, (unsigned char *) &h->hdr_chk, len_round + sizeof (struct pkthdr_chk), aes, h->iv);
+    if (symauth_decrypt (symauth, (const unsigned char *) &h->hdr_chk, len_round + sizeof (struct pkthdr_chk), (unsigned char *) &h->hdr_chk, len_round + sizeof (struct pkthdr_chk) - SYMAUTH_BLOCK_SIZE * 2, t->chksum, iv))
+        return FASTSEC_RESULT_DECRYPT_FAIL_CHKSUM;
 
     non_replay_counter_chk = read_uint (&h->hdr_chk.non_replay_counter, sizeof (h->hdr_chk.non_replay_counter));
     pkttype_chk = read_uint (&h->hdr_chk.pkttype, sizeof (h->hdr_chk.pkttype));
     *len = read_uint (&h->hdr_chk.length, sizeof (h->hdr_chk.length));
 
-    t = (struct trailer *) &in[len_round + FASTSEC_HEADER_SIZE];
-
     if (pkttype_chk != *pkttype)
         return FASTSEC_RESULT_DECRYPT_FAIL_PKTTYPE;
     if (len_round != FASTSEC_ROUND (*len))
         return FASTSEC_RESULT_DECRYPT_FAIL_LEN;
-    if (memcmp (t->chksum, h->iv, sizeof (t->chksum)))
-        return FASTSEC_RESULT_DECRYPT_FAIL_CHKSUM;
     if (*non_replay_counter != non_replay_counter_chk)
         return FASTSEC_RESULT_DECRYPT_FAIL_REPLAY;
 
@@ -1051,7 +1038,7 @@ enum fastsec_result_process_ciphertext fastsec_process_ciphertext (struct fastse
 
         {
             enum fastsec_result_decrypt err;
-            switch ((err = _fastsec_decrypt_packet (FRAME_data, FRAME_lenround, &FRAME_pkttype, &fs->non_replay_counter_decrypt, &fs->aes_decrypt, &FRAME_len))) {
+            switch ((err = _fastsec_decrypt_packet (FRAME_data, FRAME_lenround, &FRAME_pkttype, &fs->non_replay_counter_decrypt, fs->symauth, &FRAME_len))) {
             case FASTSEC_RESULT_DECRYPT_SUCCESS:
                 break;
             default:

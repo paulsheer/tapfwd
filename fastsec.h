@@ -231,6 +231,7 @@ struct fastsec_stats {
 };
 
 struct fastsec;
+struct symauth;
 
 enum fastsec_result_process_ciphertext fastsec_process_ciphertext (struct fastsec *fs, struct fastsec_action *fsa, enum fastsec_result_decrypt *err_decrypt);
 enum fastsec_result_housekeeping fastsec_housekeeping (struct fastsec *fs, struct fastsec_action *fsa);
@@ -246,8 +247,8 @@ void fastsec_set_no_store (struct fastsec *fs, int nostore);
 void fastsec_set_auth_names (struct fastsec *fs, const char *clientname, const char *remotename);
 void fastsec_set_strict_auth (struct fastsec *fs, enum fastsec_auth auth);
 void fastsec_construct_ticket (union reconnect_ticket *ticket);
-enum fastsec_result_decrypt _fastsec_decrypt_packet (char *in, int len_round, int *pkttype, uint64_t *non_replay_counter, struct aes_key_st *aes, int *len);
-int fastsec_encrypt_packet (struct fastsec *fs, char *out, int pkttype, int len);
+enum fastsec_result_decrypt _fastsec_decrypt_packet (char *in, int len_round, int *pkttype, uint64_t *non_replay_counter, struct symauth *symauth, int *len);
+int fastsec_encrypt_packet (struct fastsec *fs, char *const out, int pkttype, const int len);
 enum fastsec_result_init fastsec_init (struct fastsec *fs, char *errmsg);
 void fastsec_free (struct fastsec *fs);
 void fastsec_stats (struct fastsec *fs, struct fastsec_stats *);

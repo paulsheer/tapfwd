@@ -11,10 +11,13 @@
  * For 32-bit builds AES-NI is not supported.
  */
 
+#pragma GCC optimize("O6")
+#pragma GCC target("aes")
+
 #include <assert.h>
 #include <stdio.h>
-#include <string.h>
 #include <stdint.h>
+#include <string.h>
 
 #define GETU32(pt) (((u32)(pt)[0] << 24) ^ ((u32)(pt)[1] << 16) ^ ((u32)(pt)[2] <<  8) ^ ((u32)(pt)[3]))
 #define PUTU32(ct, st) { (ct)[0] = (u8)((st) >> 24); (ct)[1] = (u8)((st) >> 16); (ct)[2] = (u8)((st) >>  8); (ct)[3] = (u8)(st); }
@@ -381,13 +384,20 @@ void aes_decrypt(const unsigned char *in, unsigned char *out,
 
 void aes_cbc128_encrypt (const unsigned char *in, unsigned char *out, int len, const struct aes_key_st *key, unsigned char ivec[16])
 {
+    unsigned char dummy[16];
+    int auth = 0;
     int n;
     const unsigned char *iv = ivec;
 
     if (len == 0)
         return;
 
+    if (!out)
+        auth = 1;
+
     while (len) {
+        if (auth)
+            out = dummy;
         for (n = 0; n < 16 && n < len; ++n)
             out[n] = in[n] ^ iv[n];
         for (; n < 16; ++n)
@@ -432,6 +442,7 @@ void aes_cbc128_decrypt (const unsigned char *in, unsigned char *out, int len, c
         out += 16;
     }
 }
+
 
 #if defined(__x86_64) || defined(__x86_64__)
 
@@ -497,9 +508,12 @@ int aes_has_aesni (void)
 
 void aes_ni_cbc_encrypt (const unsigned char *in, unsigned char *out, int len, const struct aes_key_st *key, unsigned char _iv[16])
 {
+    int auth = 0;
     struct aes_block b;
     __m128i *k = (__m128i *) key->rd_key;
     __m128i iv;
+    if (!out)
+        auth = 1;
     memcpy (&b, _iv, 16);
     iv = _mm_loadu_si128 ((__m128i *) &b);
     __m128i K0 = _mm_loadu_si128 (k + 0);
@@ -538,7 +552,8 @@ void aes_ni_cbc_encrypt (const unsigned char *in, unsigned char *out, int len, c
         m = _mm_aesenclast_si128 (m, K14);
         iv = m;
         _mm_storeu_si128 ((__m128i *) &b, m);
-        memcpy (out, &b, 16);
+        if (!auth)
+            memcpy (out, &b, 16);
     }
     _mm_storeu_si128 ((__m128i *) &b, iv);
     memcpy (_iv, &b, 16);

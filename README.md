@@ -2,8 +2,7 @@
 
 Command-line tool for secure forwarding through a tap device to create reverse a proxy or VPN.
 
-
-
+    |    
     |    Usage:
     |      tapfwd  -c <remoteaddress> -ip <localprivateaddress> -n <clientname>
     |          [-p <port>] [-tun <dev>] [-auth]
@@ -78,3 +77,36 @@ Command-line tool for secure forwarding through a tap device to create reverse a
     |      order of milliseconds. The 32-bit version is software-only and takes approximate 10X longer to
     |      perform a key exchange.
     |    
+
+
+The encryption algorithm is as follows.
+
+Definitions
+    P => plaintext
+    M => ciphertext
+    K1, k2 => key
+    V => IV
+    I => nonce
+
+    V, S, s, A1, A2, I, Q are 128 bits
+    P, C, D are n * 128 bits, n > 0
+    D is discarded
+
+    AES_CBC_ENC(key, IV, plaintext) => (newIV, ciphertext)
+    SHA256(...) => (128bit, 128bit)
+
+Encryption
+    (C, Q) <= AES_CBC_ENC(K1, V, (I, P))
+    (A1, A2) <= SHA256(V, C(firstblock), Q, AES_ECB_ENC(K2, V))
+    (D, S) <= AES_CBC_ENC(K2, A1, C)
+    (D, S) <= AES_CBC_ENC(K2, S, A2)
+    M <= (V, C, S)
+
+Decryption
+    (V, C, s) <= M
+    (A1, A2) <= SHA256(V, C(firstblock), C(lastblock), AES_ECB_ENC(K2, V))
+    (D, S) <= AES_CBC_ENC(K2, A, C)
+    (D, S) <= AES_CBC_ENC(K2, S, A2)
+    S ?= s
+    ((I, P), Q) <= AES_CBC_DEC(K1, V, C)
+

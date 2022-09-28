@@ -79,7 +79,7 @@ Command-line tool for secure forwarding through a tap device to create reverse a
     |    
 
 
-The encryption algorithm is as follows.
+The symmetric encryption algorithm is as follows.
 
 Definitions
     P => plaintext

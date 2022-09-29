@@ -374,7 +374,6 @@ static void make_transient_public_private_key (struct randseries *s, struct ecke
 
     memset (basepoint.v448, '\0', sizeof (basepoint.v448));
     basepoint.v448[0] = 5;
-
     curve448 (pubkey->v448, privkey->v448, basepoint.v448);
 }
 
@@ -773,6 +772,9 @@ enum fastsec_result_keyexchange fastsec_keyexchange (struct fastsec *fs, struct 
             keydgst (RGHT (FRAME_hd.trnsnt_secret.v448, FASTSEC_KEY_SZ), RGHT (FRAME_hd.trnsnt_secret.v25519, FASTSEC_BLOCK_SZ), FRAME_hd.transient_key2);
             xor_mem (FRAME_aes_key_encrypt, FRAME_hd.transient_key1, FASTSEC_KEY_SZ);
             xor_mem (FRAME_aes_key_decrypt, FRAME_hd.transient_key2, FASTSEC_KEY_SZ);
+            /* hide secrets: */
+            memset (FRAME_hd.transient_key1, '\0', sizeof (FRAME_hd.transient_key1));
+            memset (FRAME_hd.transient_key2, '\0', sizeof (FRAME_hd.transient_key2));
 
             if (fs->symauth)
                 symauth_free (fs->symauth);
@@ -868,6 +870,9 @@ enum fastsec_result_keyexchange fastsec_keyexchange (struct fastsec *fs, struct 
             keydgst (RGHT (FRAME_hd.trnsnt_secret.v448, FASTSEC_KEY_SZ), RGHT (FRAME_hd.trnsnt_secret.v25519, FASTSEC_BLOCK_SZ), FRAME_hd.transient_key1);
             xor_mem (FRAME_aes_key_decrypt, FRAME_hd.transient_key2, FASTSEC_KEY_SZ);
             xor_mem (FRAME_aes_key_encrypt, FRAME_hd.transient_key1, FASTSEC_KEY_SZ);
+            /* hide secrets: */
+            memset (FRAME_hd.transient_key2, '\0', sizeof (FRAME_hd.transient_key2));
+            memset (FRAME_hd.transient_key1, '\0', sizeof (FRAME_hd.transient_key1));
 
             if (fs->symauth)
                 symauth_free (fs->symauth);

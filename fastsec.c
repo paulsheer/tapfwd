@@ -549,9 +549,9 @@ static void keydgst (const unsigned char *egg_white, const unsigned char *egg_yo
 
 enum fastsec_result_init fastsec_init (struct fastsec *fs, char *errmsg)
 {
-    const char *privkey_fname = "/var/tmp/tapfwd-ecurve-private-key.dat";
-    const char *remotepubkey_fname = "/var/tmp/tapfwd-ecurve-remote-public-key.dat";
-    const char *pubkey_fname = "/var/tmp/tapfwd-ecurve-public-key.dat";
+    const char *privkey_fname = "/var/lib/tapfwd/tapfwd-ecurve-private-key.dat";
+    const char *remotepubkey_fname = "/var/lib/tapfwd/tapfwd-ecurve-remote-public-key.dat";
+    const char *pubkey_fname = "/var/lib/tapfwd/tapfwd-ecurve-public-key.dat";
 
     _fastsec_runcurvetests ();
 

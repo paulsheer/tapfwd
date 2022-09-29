@@ -1,5 +1,5 @@
 
-The symmetric encryption algorithm is as follows.
+The symmetric encryption algorithm is as follows:
 
 Definitions
     P => plaintext
@@ -29,4 +29,120 @@ Decryption
     (D, S) <= AES_CBC_ENC(K2, S, A2)
     S ?= s
     ((I, P), Q) <= AES_CBC_DEC(K1, V, C)
+
+
+
+The asymmetric encryption algorithm is as follows:
+
+Nomenclature:
+
+    D → permanent local storage Database
+    random() → strong random number generator
+    Priv → private EC key
+    Pub → public EC key
+    TPriv → private EC key for this session only
+    TPub → public EC key for this session only
+    C2 → client EC key curv25519
+    C4 → client EC key curv448
+    S1 → server EC key curv25519
+    S2 → server EC key curv448
+    B1 → base point for curv25519
+    B2 → base point for curv448
+    Ke → shared secret encryption key result
+    Kd → shared secret decryption key result
+    CN → client common name
+    SN → server common name
+
+    AES_ECB(k,p) → encrypt plaintext p with key k using AES ECB
+    ⊕ → Exclusive OR
+    ⇨ → Finate state machine state transition
+
+    (Notes: PrivC2,S2    byte[0] &= 248,  byte[31] &= 127,  byte[31] |= 64,   as required)
+
+
+Client:
+
+    Initialization → {
+            PrivC2 ← random()
+            PubC2 ← curve25519(PrivC2, B1)
+            PrivC4 ← random()
+            PubC4 ← curve448(PrivC4, B2)
+            D ← (PrivC2, PubC2, PrivC4, PubC4)
+            share to public ← (CN, PubC2, PubC4)
+
+            state ← [IDLE]
+    }
+
+    state: [IDLE] ⇨ [SENT_MSG] {
+            (PrivC2, PubC2, PrivC4, PubC4) < D
+
+            TPrivC2 ← random()
+            TPubC2 ← curve25519(TPrivC2, B1)
+            TPrivC4 ← random()
+            TPubC4 ← curve448(TPrivC4, B2)
+
+            send(CN, TPubC2, PubC2, TPubC4, PubC4)
+    }
+
+    state: [SENT_MSG] ⇨ [VERIFY_SERVER] {
+            (SN, TPubS1, PubS1, TPubS2, PubS2) ← recv()
+    }
+
+    state: [VERIFY_SERVER] ⇨ [DO_MATH] {
+            verify SN is a match for PubS1,2 against public data
+    }
+
+    state: [DO_MATH] ⇨ [CONNECTED] {
+            K2a ← curve25519(PrivC2, PubS1)
+            K4a ← curve448(PrivC4, PubS2)
+            K2b ← curve25519(TPrivC2, TPubS1)
+            K4b ← curve448(TPrivC4, TPubS2)
+
+            (Ke, Kd) < (AES_ECB(K2a, K4a)  ⊕  AES_ECB(K2b, K4b))
+            discard K2a, K4a, K2b, K4b
+    }
+
+
+Server:
+
+    Initialization → {
+            PrivS1 ← random()
+            PubS1 ← curve25519(PrivS1, B1)
+            PrivS2 ← random()
+            PubS2 ← curve448(PrivS2, B2)
+            share to public ← (SN, PubS1, PubS2)
+            D ← (PrivS1, PubS1, PrivS2, PubS2)
+
+            state ← [IDLE]
+    }
+
+    state: [IDLE] ⇨ [VERIFY_CLIENT] {
+            (CN, TPubC2, PubC2, TPubC4, PubC4) ← recv()
+    }
+
+    state: [VERIFY_CLIENT] ⇨ [DO_MATH] {
+            verify CN is a match for PubC1,2 against public data
+    }
+
+    state: [RECEIVED_MSG] ⇨ [DO_MATH] {
+            (PrivS1, PubS1, PrivS2, PubS2) < D
+
+            TPrivS1 ← random()
+            TPubS1 ← curve25519(TPrivS1, B1)
+            TPrivS2 ← random()
+            TPubS2 ← curve448(TPrivS2, B2)
+
+            send(SN, TPubS1, PubS1, TPubS2, PubS2)
+    }
+
+    state: [DO_MATH] ⇨ [CONNECTED] {
+            K2a ← curve25519(PrivS1, PubC2)
+            K4a ← curve448(PrivS2, PubC4)
+            K2b ← curve25519(TPrivS1, TPubC2)
+            K4b ← curve448(TPrivS2, TPubC4)
+
+            (Kd, Ke) < (AES_ECB(K2a, K4a)  ⊕  AES_ECB(K2b, K4b))
+            discard K2a, K4a, K2b, K4b
+    }
+
 

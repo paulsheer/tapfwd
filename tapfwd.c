@@ -454,19 +454,19 @@ static void print_help (void)
     printf ("both EC curves to mitigate against a weakness in either one. Public keys of remote hosts are\n");
     printf ("stored on the file-system for future authentication.\n");
     printf ("\nFiles:\n");
-    printf ("  /var/tmp/tapfwd-ecurve-private-key.dat           Stores the private key. Keep this secret.\n");
-    printf ("  /var/tmp/tapfwd-ecurve-public-key.dat            Stores public key of local host.\n");
-    printf ("  /var/tmp/tapfwd-ecurve-remote-public-key.dat     Stores public keys of remote hosts.\n");
+    printf ("  /var/lib/tapfwd/tapfwd-ecurve-private-key.dat           Stores the private key. Keep this secret.\n");
+    printf ("  /var/lib/tapfwd/tapfwd-ecurve-public-key.dat            Stores public key of local host.\n");
+    printf ("  /var/lib/tapfwd/tapfwd-ecurve-remote-public-key.dat     Stores public keys of remote hosts.\n");
     printf ("\nIf the remote changes its public key, or if a 'man-in-the-middle-attack' is attempted,\n");
     printf ("then tapfwd will output an error message,\n");
-    printf ("\n    error: /var/tmp/tapfwd-ecurve-remote-public-key.dat:N: public key for remote 'V' does not match\n");
+    printf ("\n    error: /var/lib/tapfwd/tapfwd-ecurve-remote-public-key.dat:N: public key for remote 'V' does not match\n");
     printf ("\nwhere N is the line number of the expected key and V is <clientname> or <remoteaddress>.\n");
     printf ("\nPerfect security can be obtained by running tapfwd -pubkey on the remote machine and placing\n");
     printf ("the output into a new line in tapfwd-ecurve-remote-public-key.dat on the local machine,\n");
-    printf ("and visa-versa. For example the file root@123.4.5.6:/var/tmp/tapfwd-ecurve-remote-public-key.dat\n");
+    printf ("and visa-versa. For example the file root@123.4.5.6:/var/lib/tapfwd/tapfwd-ecurve-remote-public-key.dat\n");
     printf ("contains:\n\n");
     printf ("   99.1.2.3     5c76b317abbb1c2617c53480a96eac9fdee47d01989bcd7fd003714c7dc53f004e\n");
-    printf ("\nand the file root@99.1.2.3:/var/tmp/tapfwd-ecurve-remote-public-key.dat contains:\n\n");
+    printf ("\nand the file root@99.1.2.3:/var/lib/tapfwd/tapfwd-ecurve-remote-public-key.dat contains:\n\n");
     printf ("   bill@microsoft.com     169db5a12a3167b12af96d3fc0f243fd3f22e88ea73bf3a1c69481365ec9340123\n");
     printf ("\nBe sure to use the -auth option.\n");
     printf ("\nNotes:");
@@ -604,6 +604,23 @@ static void handshake_complete (enum fastsec_mode mode, const char *errmsg, int 
     }
 }
 
+static void create_var_directory (void)
+{
+    struct stat st;
+    const char *d = "/var/lib/tapfwd";
+    int r;
+    if ((r = stat (d, &st))) {
+        if (errno == ENOENT && !mkdir (d, 0700))
+            return;
+        perror (d);
+        exit (1);
+    }
+    if ((st.st_mode & S_IFMT) != S_IFDIR) {
+        fprintf (stderr, "%s: not a directory\n", d);
+        exit (1);
+    }
+}
+
 int main (int argc, char **argv)
 {
     struct fastsec *fs;
@@ -618,6 +635,7 @@ int main (int argc, char **argv)
     long long connect_time_start;
     enum fastsec_mode mode;
 
+    create_var_directory ();
 
     cmdlineopt = &cmdlineopt_;
     cmdlineoption_setdefaults (cmdlineopt);

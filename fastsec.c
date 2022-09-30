@@ -35,6 +35,8 @@
 #define WARN_UNUSED             
 #endif
 
+#define FASTSEC_HEADER_SIZE     ((int) sizeof (struct header))
+#define FASTSEC_TRAILER_SIZE    ((int) sizeof (struct trailer))
 
 
 struct pkthdr {
@@ -169,12 +171,21 @@ union fastsec_frame {
     struct fastsec_frame_keyexchange fastsec_keyexchange;
 };
 
+int fastsec_header_size (struct fastsec *fs)
+{
+    (void) fs;
+    return (int) sizeof (struct header);
+}
 
-int _fastsec_header_size = (int) sizeof (struct header);
-int _fastsec_trailer_size = (int) sizeof (struct trailer);
+int fastsec_trailer_size (struct fastsec *fs)
+{
+    (void) fs;
+    return (int) sizeof (struct trailer);
+}
 
 
 struct fastsec {
+    int verbose;
     int server_mode;
     int connected;
     union fastsec_frame frame;
@@ -201,6 +212,12 @@ struct fastsec {
     const char *remotename;
 //     union reconnect_ticket *reconnect_ticket;
 };
+
+
+void fastsec_set_verbose (struct fastsec *fs, int verbose)
+{
+    fs->verbose = verbose;
+}
 
 
 
@@ -1212,6 +1229,8 @@ enum fastsec_result_process_ciphertext fastsec_process_ciphertext (struct fastse
             return FASTSEC_RESULT_PROCESS_CIPHERTEXT_ACTION;
 
         case FASTSEC_PKTTYPE_HEARTBEAT:
+            if (fs->verbose)
+                printf ("got heartbeat\n");
             fs->last_hb_recv = FRAME_now;
             break;
 

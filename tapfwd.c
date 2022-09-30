@@ -55,6 +55,7 @@ struct cmdlineoption {
     int co_auth;
     int co_noauth;
     int co_nostore;
+    int co_verbose;
 };
 
 static void cmdlineoption_setdefaults (struct cmdlineoption *o)
@@ -417,9 +418,9 @@ static void print_help (void)
     printf ("\n");
     printf ("Usage:\n");
     printf ("  tapfwd  -c <remoteaddress> -ip <localprivateaddress> -n <clientname>\n");
-    printf ("      [-p <port>] [-tun <dev>] [-auth]\n");
+    printf ("      [-p <port>] [-tun <dev>] [-auth] [-v]\n");
     printf ("  tapfwd  -l <listenaddress> -allow <addr>/<mask>[,<addr>/<mask>]... -ip <localprivateaddress>\n");
-    printf ("      [-p <port>] [-tun <dev>] [-noauth] [-nostore]\n");
+    printf ("      [-p <port>] [-tun <dev>] [-noauth] [-nostore] [-v]\n");
     printf ("  tapfwd  -pubkey\n");
     printf ("\nOptions:\n");
     printf ("  -l <listenaddress>       Server mode. Listens for incoming connections on <listenaddress>.\n");
@@ -433,6 +434,7 @@ static void print_help (void)
     printf ("                           Restrict incoming connections to clients that match.\n");
     printf ("  -p <port>                Preferred TCP port over which to tunnel traffic. Default 27683\n");
     printf ("  -tun <dev>               Preferred tun device. Default tun0\n");
+    printf ("  -v                       Verbose diagnostic logs\n");
     printf ("  -auth                    Indicates that a remote must already have its own line within\n");
     printf ("                           tapfwd-ecurve-remote-public-key.dat or else the handshake will\n");
     printf ("                           be rejected. That is, new public keys will not be stored. This\n");
@@ -517,6 +519,8 @@ static void cmdlineoption_parse (struct cmdlineoption *cmdlineopt, int argc, cha
         } else if (!strcmp (argv[i], "-c")) {
             ARGER;
             cmdlineopt->co_remote = argv[++i];
+        } else if (!strcmp (argv[i], "-v")) {
+            cmdlineopt->co_verbose++;
         } else if (!strcmp (argv[i], "-p")) {
             ARGER;
             cmdlineopt->co_port = atoi (argv[++i]);
@@ -662,6 +666,9 @@ int main (int argc, char **argv)
         fatalerror (errmsg);
         break;
     }
+
+    fastsec_set_verbose (fs, cmdlineopt->co_verbose);
+
 
     if (cmdlineopt->co_pubkey) {
         char w[1024];
@@ -830,7 +837,7 @@ int main (int argc, char **argv)
             }
 
         if (!fastsec_got_close_request (fs) && fastsec_connected (fs)) {
-            SETUP (devfd, rd, FASTSEC_BUF_SIZE - buf1.avail, 1500 + FASTSEC_HEADER_SIZE + FASTSEC_TRAILER_SIZE + 256);      /* 256 = fudge */
+            SETUP (devfd, rd, FASTSEC_BUF_SIZE - buf1.avail, 1500 + fastsec_header_size (fs) + fastsec_trailer_size (fs) + 256);      /* 256 = fudge */
         }
         SETUP (sock, rd, FASTSEC_BUF_SIZE - buf2.avail, 1);
         SETUP (sock, wr, buf1.avail - buf1.written, 1);
@@ -897,7 +904,7 @@ int main (int argc, char **argv)
 
         if (FD_ISSET (devfd, &rd)) {
             int r;
-            r = read (devfd, buf1.data + buf1.avail + FASTSEC_HEADER_SIZE, FASTSEC_BUF_SIZE - buf1.avail - (FASTSEC_HEADER_SIZE + FASTSEC_TRAILER_SIZE));
+            r = read (devfd, buf1.data + buf1.avail + fastsec_header_size (fs), FASTSEC_BUF_SIZE - buf1.avail - (fastsec_header_size (fs) + fastsec_trailer_size (fs)));
             if (r == -1 && errno_TEMP ()) {
                 /* ignore */
             } else if (r < 1) {

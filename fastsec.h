@@ -91,8 +91,6 @@ enum fastsec_packet_type {
 extern int _fastsec_header_size;
 extern int _fastsec_trailer_size;
 
-#define FASTSEC_HEADER_SIZE     _fastsec_header_size
-#define FASTSEC_TRAILER_SIZE    _fastsec_trailer_size
 #define FASTSEC_FULLLEN(c)      ((c) + (int) sizeof(struct pkthdr_chk))
 #define FASTSEC_CRYPTLEN(c)     ((FASTSEC_FULLLEN(c) + (FASTSEC_BLOCK_SZ - 1)) - ((FASTSEC_FULLLEN(c) + (FASTSEC_BLOCK_SZ - 1))) % FASTSEC_BLOCK_SZ)
 #define FASTSEC_ROUND(c)        (FASTSEC_CRYPTLEN(c) - (int) sizeof(struct pkthdr_chk))
@@ -128,7 +126,8 @@ void fastsec_stats (struct fastsec *fs, struct fastsec_stats *);
 struct fastsec *fastsec_new (void);
 void fastsec_reconnect (struct fastsec *fs);
 int fastsec_header_size (struct fastsec *fs);
-
+int fastsec_trailer_size (struct fastsec *fs);
+void fastsec_set_verbose (struct fastsec *fs, int verbose);
 
 
 

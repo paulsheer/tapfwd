@@ -5,9 +5,9 @@ Command-line tool for secure forwarding through a tap device to create reverse a
     |    
     |    Usage:
     |      tapfwd  -c <remoteaddress> -ip <localprivateaddress> -n <clientname>
-    |          [-p <port>] [-tun <dev>] [-auth]
+    |          [-p <port>] [-tun <dev>] [-auth] [-v]
     |      tapfwd  -l <listenaddress> -allow <addr>/<mask>[,<addr>/<mask>]... -ip <localprivateaddress>
-    |          [-p <port>] [-tun <dev>] [-noauth] [-nostore]
+    |          [-p <port>] [-tun <dev>] [-noauth] [-nostore] [-v]
     |      tapfwd  -pubkey
     |    
     |    Options:
@@ -22,6 +22,7 @@ Command-line tool for secure forwarding through a tap device to create reverse a
     |                               Restrict incoming connections to clients that match.
     |      -p <port>                Preferred TCP port over which to tunnel traffic. Default 27683
     |      -tun <dev>               Preferred tun device. Default tun0
+    |      -v                       Verbose diagnostic logs
     |      -auth                    Indicates that a remote must already have its own line within
     |                               tapfwd-ecurve-remote-public-key.dat or else the handshake will
     |                               be rejected. That is, new public keys will not be stored. This

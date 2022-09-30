@@ -67,6 +67,13 @@ enum fastsec_action_type {
     FASTSEC_ACTION_TYPE_CONSUME_CIPHERTEXT_SUCCESS,
 };
 
+struct fastsec_action {
+    enum fastsec_action_type action;
+    char *data;
+    int datalen;
+    int result;
+};
+
 #define FASTSEC_CLIENTNAME_MAXLEN               96
 #define FASTSEC_BLOCK_SZ                        16
 #define FASTSEC_KEY_SZ                          32
@@ -81,149 +88,14 @@ enum fastsec_packet_type {
     FASTSEC_PKTTYPE_FUTURE = 255,       /* verify that future packet-types don't terminate the remote end. */
 };
 
-struct reconnect_ticket_ {
-    unsigned char ticket[FASTSEC_BLOCK_SZ];
-    uint64_t utc_seconds;
-};
+extern int _fastsec_header_size;
+extern int _fastsec_trailer_size;
 
-union reconnect_ticket {
-    struct reconnect_ticket_ d;
-    unsigned char blocks[FASTSEC_BLOCK_SZ * 2];
-};
-
-
-struct pkthdr {
-    unsigned char pkttype;
-    unsigned short length;
-} __attribute ((packed));
-
-struct pkthdr_chk {
-    uint64_t non_replay_counter;
-    unsigned char pkttype;
-    unsigned short length;
-} __attribute ((packed));
-
-struct header {
-    struct pkthdr hdr;
-    unsigned char iv[FASTSEC_BLOCK_SZ];
-    struct pkthdr_chk hdr_chk;      /* <== this part is also sent crypto */
-} __attribute ((packed));
-
-struct trailer {
-    unsigned char chksum[FASTSEC_BLOCK_SZ];
-} __attribute ((packed));
-
-#define FASTSEC_HEADER_SIZE     ((int) sizeof(struct header))
-#define FASTSEC_TRAILER_SIZE    ((int) sizeof(struct trailer))
+#define FASTSEC_HEADER_SIZE     _fastsec_header_size
+#define FASTSEC_TRAILER_SIZE    _fastsec_trailer_size
 #define FASTSEC_FULLLEN(c)      ((c) + (int) sizeof(struct pkthdr_chk))
 #define FASTSEC_CRYPTLEN(c)     ((FASTSEC_FULLLEN(c) + (FASTSEC_BLOCK_SZ - 1)) - ((FASTSEC_FULLLEN(c) + (FASTSEC_BLOCK_SZ - 1))) % FASTSEC_BLOCK_SZ)
 #define FASTSEC_ROUND(c)        (FASTSEC_CRYPTLEN(c) - (int) sizeof(struct pkthdr_chk))
-
-struct eckey {
-    unsigned char v25519[32];
-    unsigned char v448[56];
-} __attribute__ ((packed));
-
-struct client_hello {
-    unsigned char client_hello_version;
-    char clientname[FASTSEC_CLIENTNAME_MAXLEN];
-    struct eckey pubkey;                /* stored on file-system and verified */
-    struct eckey transient_pubkey;      /* generated new for each session */
-#ifdef TICKET
-    unsigned char signed_ticket[16];
-#endif
-} __attribute__ ((packed));
-
-struct server_hello {
-    unsigned char server_hello_version;
-    struct eckey pubkey;
-    struct eckey transient_pubkey;
-#ifdef TICKET
-    unsigned char next_keymaterial[64];
-    unsigned char reconnect_ticket[16];
-#endif
-} __attribute__ ((packed));
-
-
-struct handshakedata {
-    struct client_hello ch;
-    struct server_hello sh;
-    struct eckey privkey;
-    struct eckey transient_privkey;
-    struct eckey shared_secret;
-    struct eckey trnsnt_secret;
-    unsigned char transient_key1[FASTSEC_KEY_SZ];
-    unsigned char transient_key2[FASTSEC_KEY_SZ];
-};
-
-
-struct fastsec_action {
-    enum fastsec_action_type action;
-    char *data;
-    int datalen;
-    int result;
-};
-
-enum fastsec_state_process_ciphertext {
-    FASTSEC_STATE_PROCESS_CIPHERTEXT_CONNECTED = 1,
-    FASTSEC_STATE_PROCESS_CIPHERTEXT_WANT_CIPHERTEXT = 2,
-    FASTSEC_STATE_PROCESS_CIPHERTEXT_DECRYPTING = 3,
-    FASTSEC_STATE_PROCESS_CIPHERTEXT_DECRYPTING_NEXT = 4,
-};
-
-struct fastsec_frame_process_ciphertext {
-    enum fastsec_state_process_ciphertext state;
-    char *data;
-    int datalen;
-    time_t now;
-    int readcount;
-    int len;
-    int lenround;
-    int pkttype;
-};
-
-enum fastsec_state_housekeeping {
-    FASTSEC_STATE_HOUSEKEEPING_CONNECTED = 1,
-    FASTSEC_STATE_HOUSEKEEPING_WAITING_BUF_FUTURE_PACKET = 5,
-    FASTSEC_STATE_HOUSEKEEPING_WAITING_BUF_HEARTBEAT = 6,
-    FASTSEC_STATE_HOUSEKEEPING_REQUEST_BUF_HEARTBEAT = 7,
-    FASTSEC_STATE_HOUSEKEEPING_HOUSEKEEPING_DONE = 8,
-};
-
-struct fastsec_frame_housekeeping {
-    enum fastsec_state_housekeeping state;
-    time_t now;
-    int maxlen;
-};
-
-enum fastsec_state_keyexchange {
-    FASTSEC_STATE_KEYEXCHANGE_IDLE = 0,
-    FASTSEC_STATE_KEYEXCHANGE_CONNECTED = 1,
-    FASTSEC_STATE_KEYEXCHANGE_WANT_CIPHERTEXT = 2,
-    FASTSEC_STATE_KEYEXCHANGE_MIDDLE_STEP1 = 3,
-    FASTSEC_STATE_KEYEXCHANGE_MIDDLE_STEP2 = 4,
-    FASTSEC_STATE_KEYEXCHANGE_DO_MATH = 5,
-};
-
-struct fastsec_frame_keyexchange {
-    enum fastsec_state_keyexchange state;
-    struct handshakedata hd;
-    time_t start_time;
-    unsigned char aes_key_encrypt[FASTSEC_KEY_SZ];
-    unsigned char aes_key_decrypt[FASTSEC_KEY_SZ];
-};
-
-enum fastsec_state {
-    FASTSEC_STATE_IDLE = 0,
-    FASTSEC_STATE_CONNECTED = 1,
-};
-
-union fastsec_frame {
-    enum fastsec_state state;
-    struct fastsec_frame_process_ciphertext fastsec_process_ciphertext;
-    struct fastsec_frame_housekeeping fastsec_housekeeping;
-    struct fastsec_frame_keyexchange fastsec_keyexchange;
-};
 
 struct fastsec_stats {
     uint64_t pkt_recv_count;
@@ -231,6 +103,7 @@ struct fastsec_stats {
 };
 
 struct fastsec;
+struct reconnect_ticket;
 struct symauth;
 
 enum fastsec_result_process_ciphertext fastsec_process_ciphertext (struct fastsec *fs, struct fastsec_action *fsa, enum fastsec_result_decrypt *err_decrypt);
@@ -246,7 +119,7 @@ void fastsec_set_mode (struct fastsec *fs, enum fastsec_mode m);
 void fastsec_set_no_store (struct fastsec *fs, int nostore);
 void fastsec_set_auth_names (struct fastsec *fs, const char *clientname, const char *remotename);
 void fastsec_set_strict_auth (struct fastsec *fs, enum fastsec_auth auth);
-void fastsec_construct_ticket (union reconnect_ticket *ticket);
+void fastsec_construct_ticket (struct fastsec *fs, struct reconnect_ticket *ticket);
 enum fastsec_result_decrypt _fastsec_decrypt_packet (char *in, int len_round, int *pkttype, uint64_t *non_replay_counter, struct symauth *symauth, int *len);
 int fastsec_encrypt_packet (struct fastsec *fs, char *const out, int pkttype, const int len);
 enum fastsec_result_init fastsec_init (struct fastsec *fs, char *errmsg);
@@ -254,7 +127,7 @@ void fastsec_free (struct fastsec *fs);
 void fastsec_stats (struct fastsec *fs, struct fastsec_stats *);
 struct fastsec *fastsec_new (void);
 void fastsec_reconnect (struct fastsec *fs);
-
+int fastsec_header_size (struct fastsec *fs);
 
 
 

@@ -36,6 +36,144 @@
 #endif
 
 
+
+struct pkthdr {
+    unsigned char pkttype;
+    unsigned short length;
+} __attribute ((packed));
+
+struct pkthdr_chk {
+    uint64_t non_replay_counter;
+    unsigned char pkttype;
+    unsigned short length;
+} __attribute ((packed));
+
+struct header {
+    struct pkthdr hdr;
+    unsigned char iv[FASTSEC_BLOCK_SZ];
+    struct pkthdr_chk hdr_chk;      /* <== this part is also sent crypto */
+} __attribute ((packed));
+
+struct trailer {
+    unsigned char chksum[FASTSEC_BLOCK_SZ];
+} __attribute ((packed));
+
+
+struct eckey {
+    unsigned char v25519[32];
+    unsigned char v448[56];
+} __attribute__ ((packed));
+
+struct client_hello {
+    unsigned char client_hello_version;
+    char clientname[FASTSEC_CLIENTNAME_MAXLEN];
+    struct eckey pubkey;                /* stored on file-system and verified */
+    struct eckey transient_pubkey;      /* generated new for each session */
+} __attribute__ ((packed));
+
+struct server_hello {
+    unsigned char server_hello_version;
+    struct eckey pubkey;
+    struct eckey transient_pubkey;
+} __attribute__ ((packed));
+
+
+struct handshakedata {
+    struct client_hello ch;
+    struct server_hello sh;
+    struct eckey privkey;
+    struct eckey transient_privkey;
+    struct eckey shared_secret;
+    struct eckey trnsnt_secret;
+    unsigned char transient_key1[FASTSEC_KEY_SZ];
+    unsigned char transient_key2[FASTSEC_KEY_SZ];
+};
+
+
+struct reconnect_ticket_ {
+    unsigned char aeskey_cts[FASTSEC_KEY_SZ];
+    unsigned char aeskey_stc[FASTSEC_KEY_SZ];
+    uint64_t utc_seconds;
+};
+
+union reconnect_ticket__ {
+    struct reconnect_ticket_ d;
+    char c[FASTSEC_ROUND (sizeof (struct reconnect_ticket_))];
+};
+
+struct reconnect_ticket {
+    struct header header;
+    union reconnect_ticket__ ticket;
+    struct trailer trailer;
+};
+
+
+enum fastsec_state_process_ciphertext {
+    FASTSEC_STATE_PROCESS_CIPHERTEXT_CONNECTED = 1,
+    FASTSEC_STATE_PROCESS_CIPHERTEXT_WANT_CIPHERTEXT = 2,
+    FASTSEC_STATE_PROCESS_CIPHERTEXT_DECRYPTING = 3,
+    FASTSEC_STATE_PROCESS_CIPHERTEXT_DECRYPTING_NEXT = 4,
+};
+
+struct fastsec_frame_process_ciphertext {
+    enum fastsec_state_process_ciphertext state;
+    char *data;
+    int datalen;
+    time_t now;
+    int readcount;
+    int len;
+    int lenround;
+    int pkttype;
+};
+
+enum fastsec_state_housekeeping {
+    FASTSEC_STATE_HOUSEKEEPING_CONNECTED = 1,
+    FASTSEC_STATE_HOUSEKEEPING_WAITING_BUF_FUTURE_PACKET = 5,
+    FASTSEC_STATE_HOUSEKEEPING_WAITING_BUF_HEARTBEAT = 6,
+    FASTSEC_STATE_HOUSEKEEPING_REQUEST_BUF_HEARTBEAT = 7,
+    FASTSEC_STATE_HOUSEKEEPING_HOUSEKEEPING_DONE = 8,
+};
+
+struct fastsec_frame_housekeeping {
+    enum fastsec_state_housekeeping state;
+    time_t now;
+    int maxlen;
+};
+
+enum fastsec_state_keyexchange {
+    FASTSEC_STATE_KEYEXCHANGE_IDLE = 0,
+    FASTSEC_STATE_KEYEXCHANGE_CONNECTED = 1,
+    FASTSEC_STATE_KEYEXCHANGE_WANT_CIPHERTEXT = 2,
+    FASTSEC_STATE_KEYEXCHANGE_MIDDLE_STEP1 = 3,
+    FASTSEC_STATE_KEYEXCHANGE_MIDDLE_STEP2 = 4,
+    FASTSEC_STATE_KEYEXCHANGE_DO_MATH = 5,
+};
+
+struct fastsec_frame_keyexchange {
+    enum fastsec_state_keyexchange state;
+    struct handshakedata hd;
+    time_t start_time;
+    unsigned char aes_key_encrypt[FASTSEC_KEY_SZ];
+    unsigned char aes_key_decrypt[FASTSEC_KEY_SZ];
+};
+
+enum fastsec_state {
+    FASTSEC_STATE_IDLE = 0,
+    FASTSEC_STATE_CONNECTED = 1,
+};
+
+union fastsec_frame {
+    enum fastsec_state state;
+    struct fastsec_frame_process_ciphertext fastsec_process_ciphertext;
+    struct fastsec_frame_housekeeping fastsec_housekeeping;
+    struct fastsec_frame_keyexchange fastsec_keyexchange;
+};
+
+
+int _fastsec_header_size = (int) sizeof (struct header);
+int _fastsec_trailer_size = (int) sizeof (struct trailer);
+
+
 struct fastsec {
     int server_mode;
     int connected;
@@ -47,7 +185,7 @@ struct fastsec {
     struct symauth *symauth;
     time_t last_hb_sent;
     time_t last_hb_recv;
-    union reconnect_ticket *save_ticket;
+//     union reconnect_ticket *save_ticket;
     int server_ticket_recieved;
     int client_close_req_recieved;
     int future_packet_sent;
@@ -61,7 +199,7 @@ struct fastsec {
     const char *privkey_fname;
     const char *clientname;
     const char *remotename;
-    union reconnect_ticket *reconnect_ticket;
+//     union reconnect_ticket *reconnect_ticket;
 };
 
 
@@ -965,16 +1103,25 @@ enum fastsec_result_decrypt _fastsec_decrypt_packet (char *in, int len_round, in
     return FASTSEC_RESULT_DECRYPT_SUCCESS;
 }
 
-void fastsec_construct_ticket (union reconnect_ticket *ticket)
+void fastsec_construct_ticket (struct fastsec *fs, struct reconnect_ticket *ticket)
 {
+    int c;
     unsigned long long expire_time;
+    char somekey[FASTSEC_KEY_SZ];
     memset (ticket, '\0', sizeof (*ticket));
 
 /* construct ticket */
 
     expire_time = time(NULL);
     expire_time += 30 * 60;
-    write_uint (&ticket->d.utc_seconds, expire_time, sizeof (ticket->d.utc_seconds));
+
+    write_uint (&ticket->ticket.d.utc_seconds, expire_time, sizeof (ticket->ticket.d.utc_seconds));
+
+    memcpy (ticket->ticket.d.aeskey_cts, somekey, FASTSEC_KEY_SZ);
+    memcpy (ticket->ticket.d.aeskey_stc, somekey, FASTSEC_KEY_SZ);
+
+    c = fastsec_encrypt_packet (fs, (char *) &ticket, FASTSEC_PKTTYPE_RESPONSETOCLOSEREQ, sizeof (ticket->ticket));
+    assert (c == sizeof (ticket));
 }
 
 
@@ -1069,24 +1216,24 @@ enum fastsec_result_process_ciphertext fastsec_process_ciphertext (struct fastse
             break;
 
         case FASTSEC_PKTTYPE_RESPONSETOCLOSEREQ:
-            if (FRAME_len != sizeof (*fs->save_ticket)) {
+            if (FRAME_len != sizeof (struct reconnect_ticket_)) {
                 FRAME_state = FASTSEC_STATE_PROCESS_CIPHERTEXT_CONNECTED;
                 return FASTSEC_RESULT_PROCESS_CIPHERTEXT_FAIL_CLIENTCLOSERESPONSE_INVALID_PKT_SIZE;
             }
             fs->server_ticket_recieved = 1;
-            memcpy (fs->save_ticket, FRAME_data + FASTSEC_HEADER_SIZE, sizeof (*fs->save_ticket));
-            fs->save_ticket->d.utc_seconds = read_uint (&fs->save_ticket->d.utc_seconds, sizeof (fs->save_ticket->d.utc_seconds));
-printf ("TBD\n");
+
+//             memcpy (fs->save_ticket, FRAME_data + FASTSEC_HEADER_SIZE, sizeof (*fs->save_ticket));
+//             fs->save_ticket->d.utc_seconds = read_uint (&fs->save_ticket->d.utc_seconds, sizeof (fs->save_ticket->d.utc_seconds));
+// printf ("TBD\n");
+
             goto done;
 
         case FASTSEC_PKTTYPE_CLIENTCLOSEREQ:
             if (fs->server_mode) {
-                union reconnect_ticket ticket;
+                struct reconnect_ticket ticket;
                 fs->client_close_req_recieved = 1;
-                fastsec_construct_ticket (&ticket);
-                memcpy (FRAME_data + FASTSEC_HEADER_SIZE, &ticket, sizeof (ticket));
-printf ("TBD\n");
-//                 make_encrypted_packet (&buf1, randseries, FASTSEC_PKTTYPE_RESPONSETOCLOSEREQ, FASTSEC_BLOCK_SZ);
+                fastsec_construct_ticket (fs, &ticket);
+                fastsec_encrypt_packet (fs, (char *) &ticket, FASTSEC_PKTTYPE_RESPONSETOCLOSEREQ, sizeof (ticket.ticket));
             } else {
                 FRAME_state = FASTSEC_STATE_PROCESS_CIPHERTEXT_CONNECTED;
                 return FASTSEC_RESULT_PROCESS_CIPHERTEXT_FAIL_CLIENT_RCVD_CLIENTCLOSEREQ;

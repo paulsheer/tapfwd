@@ -626,7 +626,9 @@ int main (int argc, char **argv)
     struct fastsec *fs;
     struct cmdlineoption cmdlineopt_;
     struct cmdlineoption *cmdlineopt;
+#if 0
     union reconnect_ticket save_ticket;
+#endif
     int devfd, sock = -1, h = -1;
     struct iprange_list *iprange = NULL;
     struct cryptobuf buf1, buf2;
